@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tailchat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light; --ink:#17201c; --muted:#657069; --line:#dce3de; --paper:#fff; --wash:#f3f6f4; --green:#176b4d; --green2:#dff2e9; --danger:#a33; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; min-height:100%; background:var(--wash); color:var(--ink); font:15px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  button, input, textarea { font:inherit; }
+  button { cursor:pointer; }
+  button:disabled { cursor:not-allowed; opacity:.5; }
+  .app { width:min(980px,100%); min-height:100vh; margin:auto; display:grid; grid-template-columns:290px 1fr; background:var(--paper); box-shadow:0 0 40px #1f3a2b16; }
+  aside { border-right:1px solid var(--line); padding:24px 20px; background:#fbfcfb; }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:28px; }
+  .mark { display:grid; place-items:center; width:38px; height:38px; border-radius:11px; background:var(--ink); color:white; font-size:21px; }
+  h1 { margin:0; font-size:20px; letter-spacing:-.02em; }
+  .eyebrow { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.1em; font-weight:700; }
+  .side-section { margin:24px 0; }
+  .side-section h2 { margin:0 0 9px; font-size:13px; }
+  .side-section p { margin:7px 0; color:var(--muted); font-size:13px; }
+  .address { display:block; width:100%; margin:9px 0; padding:9px; border:1px solid var(--line); border-radius:8px; background:white; font:11px/1.35 ui-monospace,monospace; overflow-wrap:anywhere; max-height:82px; overflow:auto; }
+  .field { width:100%; padding:10px 11px; border:1px solid #cbd5ce; border-radius:8px; background:white; outline:none; }
+  .field:focus { border-color:var(--green); box-shadow:0 0 0 3px #176b4d17; }
+  .btn { border:1px solid #cbd5ce; border-radius:8px; padding:8px 11px; background:white; color:var(--ink); font-weight:650; }
+  .btn.primary { border-color:var(--green); background:var(--green); color:white; }
+  .row { display:flex; gap:7px; align-items:center; }
+  .row .field { min-width:0; }
+  .small { padding:6px 9px; font-size:12px; }
+  .status { display:flex; gap:7px; align-items:center; min-height:22px; color:var(--muted); font-size:12px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:#d49b2f; }
+  .dot.ready { background:#29a36a; }
+  progress { width:100%; height:4px; }
+  .hidden { display:none !important; }
+  main { min-width:0; display:flex; flex-direction:column; height:100vh; }
+  header { flex:none; padding:18px 23px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+  header h2 { margin:0; font-size:16px; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:12px; }
+  .secure { color:var(--green); font-size:12px; font-weight:650; }
+  #history { flex:1; overflow:auto; padding:25px; display:flex; flex-direction:column; gap:14px; scroll-behavior:smooth; }
+  .welcome { margin:auto; max-width:380px; text-align:center; color:var(--muted); }
+  .welcome .lock { font-size:35px; }
+  .welcome h3 { color:var(--ink); margin:8px 0 4px; }
+  .message { max-width:min(74%,540px); align-self:flex-start; }
+  .message.mine { align-self:flex-end; }
+  .meta { margin:0 4px 4px; color:var(--muted); font-size:11px; }
+  .message.mine .meta { text-align:right; }
+  .bubble { padding:10px 13px; border-radius:5px 16px 16px 16px; background:#edf1ee; overflow-wrap:anywhere; white-space:pre-wrap; }
+  .mine .bubble { color:white; background:var(--green); border-radius:16px 5px 16px 16px; }
+  .bubble.file { white-space:normal; display:flex; gap:11px; align-items:center; min-width:235px; }
+  .file-icon { font-size:23px; }
+  .file-info { min-width:0; flex:1; }
+  .file-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+  .file-size { opacity:.7; font-size:11px; }
+  .download { color:inherit; font-weight:700; }
+  audio { display:block; width:min(320px,60vw); height:38px; }
+  .composer { flex:none; position:relative; padding:13px 18px 18px; border-top:1px solid var(--line); background:#fff; }
+  .compose-row { display:flex; align-items:flex-end; gap:8px; }
+  #send-text { min-height:43px; max-height:130px; resize:none; padding:10px 12px; }
+  .icon-btn { flex:none; width:43px; height:43px; border:1px solid #cbd5ce; border-radius:11px; background:white; font-size:18px; }
+  #send-text-btn { background:var(--ink); color:white; border-color:var(--ink); }
+  #ptt-btn.recording { color:white; border-color:var(--danger); background:var(--danger); animation:pulse 1s infinite; }
+  @keyframes pulse { 50% { transform:scale(.96); } }
+  .hint { margin:7px 51px 0; color:var(--muted); font-size:11px; }
+  #drop-zone { position:absolute; inset:8px; z-index:4; display:grid; place-items:center; border:2px dashed var(--green); border-radius:12px; background:#effaf4ee; color:var(--green); font-weight:750; pointer-events:none; }
+  #incoming { list-style:none; margin:0; padding:0; }
+  #incoming li { margin:8px 0; font-size:12px; }
+  .recv-text { display:block; margin:6px 0; padding:7px; background:var(--wash); white-space:pre-wrap; max-height:120px; overflow:auto; }
+  #send-file { display:none; }
+  #send-progress { color:var(--muted); font-size:11px; min-height:16px; margin:5px 0 0; }
+  .notice { font-size:11px !important; }
+  @media (max-width:720px) {
+    .app { display:block; }
+    aside { border:0; border-bottom:1px solid var(--line); padding:13px 15px; }
+    .brand { margin:0 0 10px; }
+    .side-section { margin:10px 0; }
+    .side-section.about, #incoming-wrap { display:none; }
+    main { height:calc(100vh - 245px); min-height:420px; }
+    .message { max-width:88%; }
+    #history { padding:17px 13px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand"><div class="mark">🐈</div><div><h1>Tailchat</h1><div class="eyebrow">Private by design</div></div></div>
+
+    <div class="side-section">
+      <h2>Your room address</h2>
+      <p>Start listening, then share the address privately.</p>
+      <label class="notice"><input type="checkbox" id="persist-key"> Keep this address on this device</label>
+      <p><button id="listen-btn" class="btn primary" disabled>Start encrypted room</button></p>
+      <div id="listen-info" class="hidden">
+        <code id="listen-addr" class="address"></code>
+        <button id="copy-addr" class="btn small">Copy address</button>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <h2>Connect to someone</h2>
+      <p>Paste their Tailcat address to send messages.</p>
+      <div class="row"><input type="text" id="send-addr" class="field" placeholder="tc…" autocomplete="off" spellcheck="false"><button id="connect-btn" class="btn small">Set</button></div>
+    </div>
+
+    <div class="side-section about">
+      <p>Messages use Tailcat's end-to-end WireGuard encryption. Browser connections currently travel through a DERP relay.</p>
+    </div>
+
+    <div id="incoming-wrap" class="side-section"><h2>Legacy transfers</h2><ul id="incoming"></ul></div>
+    <div class="status"><span id="status-dot" class="dot"></span><span id="status">Loading WebAssembly…</span></div>
+    <progress id="load-progress" max="1" value="0"></progress>
+  </aside>
+
+  <main>
+    <header><div><h2>Encrypted room</h2><p id="peer-label">Waiting for a peer address</p></div><div class="secure">● End-to-end encrypted</div></header>
+    <div id="history" aria-live="polite">
+      <div id="welcome" class="welcome"><div class="lock">🔒</div><h3>A quiet, private room</h3><div>Start your room and exchange addresses. Then send text, hold to talk, or drop a file.</div></div>
+    </div>
+    <div class="composer" id="composer">
+      <div id="drop-zone" class="hidden">Drop files to send securely</div>
+      <div class="compose-row">
+        <button id="attach-btn" class="icon-btn" title="Attach a file" aria-label="Attach a file">＋</button>
+        <input type="file" id="send-file">
+        <textarea id="send-text" class="field" rows="1" placeholder="Write an encrypted message…"></textarea>
+        <button id="ptt-btn" class="icon-btn" title="Hold to talk" aria-label="Hold to talk">🎙</button>
+        <button id="send-text-btn" class="icon-btn" disabled title="Send message" aria-label="Send message">↑</button>
+      </div>
+      <div class="hint">Enter to send · Shift+Enter for a new line · hold the microphone for PTT</div>
+      <p id="send-progress"></p>
+      <button id="send-btn" class="hidden" disabled>Send file</button>
+    </div>
+  </main>
+</div>
+<script src="wasm_exec.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
