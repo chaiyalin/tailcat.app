@@ -18,4 +18,4 @@ if [[ "${PAGES_BUILD:-}" == "1" ]]; then
   rm "$out/main.wasm"
 fi
 
-echo "Tailchat distribution written to $out/"
+echo "Tailcatchat distribution written to $out/"
