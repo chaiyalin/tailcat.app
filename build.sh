@@ -7,6 +7,13 @@ if [[ "$out" != "dist" ]]; then
   exit 2
 fi
 
+required_go_version="go1.27.0"
+actual_go_version="$(go env GOVERSION)"
+if [[ "$actual_go_version" != "$required_go_version" ]]; then
+  echo "Go $required_go_version is required; found $actual_go_version" >&2
+  exit 1
+fi
+
 rm -rf -- "$out"
 mkdir -p "$out"
 
