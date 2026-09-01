@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="description" content="tailcat.app 隐私说明 / Privacy notice">
+  <title>隐私说明 / Privacy · tailcat.app</title>
+  <link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">tc</span><span>tailcat.app</span></a>
+    <nav class="legal-nav" aria-label="Legal pages">
+      <a href="/privacy/" aria-current="page">隐私 / Privacy</a>
+      <a href="/terms/">条款 / Terms</a>
+      <a href="/acceptable-use/">使用规范 / AUP</a>
+      <a href="/security/">安全 / Security</a>
+      <a href="/licenses/">许可 / Licenses</a>
+    </nav>
+  </header>
+
+  <main class="legal-page">
+    <p class="eyebrow">Public beta · 公开测试</p>
+    <h1>隐私说明 / Privacy notice</h1>
+    <p class="lede">我们尽量不收集数据，但“端到端加密”不等于没有网络元数据。本页说明浏览器、Cloudflare、Tailcat DERP 与 WebRTC 各自会处理什么。</p>
+    <p class="lede" lang="en">We try to collect as little data as possible, but end-to-end encryption does not eliminate network metadata. This notice explains what the browser, Cloudflare, Tailcat DERP, and WebRTC each process.</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-01</p>
+
+    <div class="facts" aria-label="Key privacy facts">
+      <div class="fact"><strong>无账号 / No accounts</strong><span>无需注册、登录或提供用户资料。</span></div>
+      <div class="fact"><strong>无内容存储 / No content storage</strong><span>本站没有消息、文件或语音留言数据库。</span></div>
+      <div class="fact"><strong>无历史 / No history</strong><span>没有云端聊天记录、备份或离线投递队列。</span></div>
+      <div class="fact"><strong>不做病毒扫描 / No malware scanning</strong><span>接收文件前请确认发送者，并在本地检查。</span></div>
+    </div>
+
+    <div class="notice warning">
+      <p><strong>重要：</strong>文件、文字和语音留言内容通过 WireGuard 端到端加密，但公共 DERP 中继仍能看到连接 IP、时间、所选区域和大致流量。实时 WebRTC 的通信对端和 STUN 服务也可能看到你的公网 IP。</p>
+    </div>
+
+    <div class="language-grid">
+      <section class="language-column" lang="zh-CN">
+        <p class="language-label">中文</p>
+
+        <h2>1. 谁在提供服务</h2>
+        <p>tailcat.app 是独立的非官方开源测试项目，不是 Tailscale Inc. 的产品，也未获得其关联或背书。隐私或滥用问题可联系 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。</p>
+
+        <h2>2. 本站不建立哪些数据</h2>
+        <p>本站不要求账号，不建立用户档案，也没有用于保存文字、文件、语音留言、房间成员或聊天历史的应用数据库。我们不提供离线存储、稍后下载、云端备份、内容恢复或病毒扫描。</p>
+        <p>首版不加载第三方分析脚本、第三方字体或远程错误上报。Cloudflare Web Analytics 在公开测试版中关闭。</p>
+
+        <h2>3. 打开网页时</h2>
+        <p>静态网页由 Cloudflare Pages 提供。为交付与保护网站，Cloudflare 会处理常见的 HTTP 和安全元数据，例如 IP 地址、时间、请求路径、User-Agent、TLS 与缓存信息。此类边缘日志和安全记录由 Cloudflare 按其服务配置与政策处理；本站不承诺可以访问、导出或逐条删除这些提供商记录。</p>
+        <p>邀请信息放在 URL 的 <code>#fragment</code> 中。片段不会随常规 HTTP 请求发送给 Cloudflare Pages；应用会在读取邀请后从地址栏移除片段。但它在被移除前仍可能出现在浏览器历史、剪贴板、浏览器扩展、同步功能、截图或屏幕共享中。</p>
+
+        <h2>4. Tailcat 传输</h2>
+        <p>文字、文件、语音留言以及通话信令通过 Tailcat 连接传输，并由 WireGuard 在通信双方之间端到端加密。浏览器版目前使用 Tailcat DERP 中继；中继无法读取加密内容，但会处理或观察双方 IP、连接时间、DERP 区域、数据量与流量模式等元数据。</p>
+        <p>公共 Tailcat DERP 是限速、尽力而为且无可用性 SLA 的测试基础设施。中继运营方可能依其自身政策保存运行与滥用防护日志。请勿把“内容加密”理解为匿名服务。</p>
+
+        <h2>5. 实时语音、视频和屏幕共享</h2>
+        <p>实时媒体使用浏览器 WebRTC；Tailcat 只承载加密的通话信令。STUN 用于发现网络路径，不配置 TURN。通信对端、STUN 服务以及相关网络运营方可能看到你的公网 IP 和连接候选信息。受限网络下，通话可能失败，即使 DERP 上的文字和文件仍可工作。</p>
+        <p>摄像头、麦克风和屏幕只会在你主动操作并授权后访问。浏览器会显示权限与共享状态；你可以随时拒绝权限或停止共享。</p>
+
+        <h2>6. 设备上的数据</h2>
+        <p>临时房间密钥默认只在当前页面生命周期内使用。若你主动开启“记住此地址”，私钥会保存在本站来源的 IndexedDB 中，直到你使用“忘记地址”、清除本站数据或浏览器移除它。界面语言偏好保存在本站来源的 <code>localStorage</code>。收到的文件只会在你确认后写入你选择的本地位置。</p>
+        <p>任何通信对端都可以保存其收到的内容。我们无法从对方设备删除消息、录音、文件或截图。</p>
+
+        <h2>7. 保留、控制与选择</h2>
+        <p>由于没有应用账号或内容数据库，本站通常没有可供导出或删除的账号数据。你可以停止房间、关闭标签页、忘记持久地址、清除浏览器站点数据并撤回媒体权限。Cloudflare、公共 DERP 或 STUN 提供方掌握的网络记录由各自政策管理。</p>
+
+        <h2>8. 安全与跨境处理</h2>
+        <p>网络请求和中继可能在你所在国家或地区以外处理。我们采取最小化、端到端加密、严格浏览器安全策略和无第三方脚本等措施，但无法保证绝对安全，也无法保护已受恶意软件控制的终端。</p>
+
+        <h2>9. 变更与联系</h2>
+        <p>测试期间，协议、提供商或功能可能变化。重大变更会更新本页日期。使用前请查看当前版本；问题可发送至 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>，不要在邮件中附上私钥、完整邀请链接或敏感文件。</p>
+      </section>
+
+      <section class="language-column" lang="en">
+        <p class="language-label">English</p>
+
+        <h2>1. Who provides the service</h2>
+        <p>tailcat.app is an independent, unofficial open-source beta. It is not a Tailscale Inc. product and is not affiliated with or endorsed by Tailscale. For privacy or abuse questions, contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>.</p>
+
+        <h2>2. Data the app does not create</h2>
+        <p>The site requires no account, creates no user profile, and has no application database for text, files, voice notes, room members, or chat history. We do not provide offline storage, later retrieval, cloud backups, content recovery, or malware scanning.</p>
+        <p>The initial beta loads no third-party analytics scripts, remote fonts, or remote error reporting. Cloudflare Web Analytics is disabled.</p>
+
+        <h2>3. When you open the site</h2>
+        <p>The static site is delivered by Cloudflare Pages. To deliver and protect it, Cloudflare processes ordinary HTTP and security metadata such as IP address, timestamp, request path, User-Agent, TLS information, and cache information. Cloudflare handles edge logs and security records under its service configuration and policies; we do not promise that we can access, export, or delete individual provider records.</p>
+        <p>Invitation data is placed in the URL <code>#fragment</code>. A fragment is not sent in an ordinary HTTP request to Cloudflare Pages, and the app removes it from the address bar after reading it. Before removal, it may still be exposed through browser history, the clipboard, extensions, sync features, screenshots, or screen sharing.</p>
+
+        <h2>4. Tailcat transfers</h2>
+        <p>Text, files, voice notes, and call signaling travel over Tailcat connections and are end-to-end encrypted between peers with WireGuard. Browser connections currently use Tailcat DERP relays. A relay cannot read encrypted content, but it processes or observes metadata such as peer IP addresses, connection time, DERP region, transfer volume, and traffic patterns.</p>
+        <p>Public Tailcat DERP relays are rate-limited, best-effort beta infrastructure with no uptime SLA. Relay operators may retain operational and abuse-prevention logs under their own policies. Content encryption does not make this an anonymity service.</p>
+
+        <h2>5. Live audio, video, and screen sharing</h2>
+        <p>Live media uses browser WebRTC; Tailcat carries only encrypted call signaling. STUN assists path discovery and no TURN fallback is configured. Your peer, the STUN service, and relevant network operators may see your public IP address and connection candidates. Calls can fail on restrictive networks even when DERP-relayed text and files still work.</p>
+        <p>Camera, microphone, and display access begins only after your action and browser permission. Your browser shows permission and sharing state, and you can deny permission or stop sharing at any time.</p>
+
+        <h2>6. Data on your device</h2>
+        <p>By default, an ephemeral room key is used only for the current page lifetime. If you enable “remember this address,” the private key is stored in IndexedDB for this origin until you choose “forget address,” clear site data, or the browser removes it. The interface-language preference is stored in this origin's <code>localStorage</code>. A received file is written only after you approve it and choose a local destination.</p>
+        <p>Any peer can keep content they receive. We cannot delete messages, recordings, files, or screenshots from another person's device.</p>
+
+        <h2>7. Retention, controls, and choices</h2>
+        <p>Because there is no application account or content database, the site normally has no account dataset to export or erase. You can stop a room, close the tab, forget a persistent address, clear browser site data, and revoke media permissions. Network records held by Cloudflare, public DERP, or STUN providers are governed by those providers' policies.</p>
+
+        <h2>8. Security and international processing</h2>
+        <p>Network requests and relays may be processed outside your country or region. We use minimization, end-to-end encryption, strict browser security policy, and no third-party scripts, but no system is perfectly secure and we cannot protect a compromised endpoint.</p>
+
+        <h2>9. Changes and contact</h2>
+        <p>The protocol, providers, or features may change during beta. Material changes will update the date on this page. Review the current version before use. Contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>, but never email a private key, full invitation link, or sensitive file.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <p>非 Tailscale 官方项目，未获得其关联或背书。</p>
+    <p>Unofficial project. Not affiliated with or endorsed by Tailscale Inc.</p>
+    <p><a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a></p>
+  </footer>
+</body>
+</html>

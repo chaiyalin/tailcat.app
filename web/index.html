@@ -1,198 +1,209 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<title>Tailcatchat</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { color-scheme:dark; --ink:#d7ffe4; --muted:#6f9b7d; --line:#1b4a2b; --paper:#050a07; --wash:#020503; --panel:#08110b; --panel2:#0b1710; --green:#42f584; --green2:#123a22; --danger:#ff4264; }
-  * { box-sizing:border-box; }
-  html, body { margin:0; min-height:100%; background:var(--wash); color:var(--ink); font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; }
-  body { background-image:linear-gradient(#07110955 1px,transparent 1px),linear-gradient(90deg,#07110955 1px,transparent 1px); background-size:24px 24px; }
-  button, input, textarea { font:inherit; }
-  button { cursor:pointer; }
-  button:disabled { cursor:not-allowed; opacity:.4; }
-  ::selection { color:#001407; background:var(--green); }
-  .app { width:min(1360px,100%); min-height:100vh; margin:auto; display:grid; grid-template-columns:300px 1fr; background:var(--paper); border-inline:1px solid #12351e; box-shadow:0 0 60px #00ff5530; }
-  .app.media-open { grid-template-columns:300px 320px 1fr; }
-  aside { border-right:1px solid var(--line); padding:24px 20px; background:#061009f5; }
-  .brand { display:flex; align-items:center; gap:11px; margin-bottom:28px; }
-  .mark { display:grid; place-items:center; width:40px; height:40px; border:1px solid var(--green); border-radius:2px; background:#071d0f; color:var(--green); font-size:21px; box-shadow:3px 3px 0 #174927; }
-  h1 { margin:0; color:var(--green); font-size:20px; letter-spacing:.04em; text-transform:lowercase; text-shadow:0 0 12px #42f58455; }
-  .eyebrow { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.14em; font-weight:700; }
-  .side-section { margin:24px 0; }
-  .side-section h2 { margin:0 0 9px; color:#9fffbf; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
-  .side-section h2::before { content:"> "; color:var(--green); }
-  .side-section p { margin:7px 0; color:var(--muted); font-size:12px; }
-  .address { display:block; width:100%; margin:9px 0; padding:9px; border:1px solid var(--line); border-radius:2px; background:#020704; color:#8dffb2; font:11px/1.35 inherit; overflow-wrap:anywhere; max-height:82px; overflow:auto; }
-  .field { width:100%; padding:10px 11px; border:1px solid #245c35; border-radius:2px; background:#030805; color:var(--ink); outline:none; caret-color:var(--green); }
-  .field::placeholder { color:#456a50; }
-  .field:focus { border-color:var(--green); box-shadow:0 0 0 1px var(--green),0 0 14px #42f58420; }
-  .btn { border:1px solid #28613a; border-radius:2px; padding:8px 11px; background:#08130c; color:#a8f7bf; font-weight:700; text-transform:uppercase; font-size:11px; box-shadow:2px 2px 0 #102c19; }
-  .btn:hover { border-color:var(--green); color:var(--green); }
-  .btn:active { transform:translate(2px,2px); box-shadow:none; }
-  .btn.primary { border-color:var(--green); background:#0c3019; color:var(--green); }
-  .row { display:flex; gap:7px; align-items:center; }
-  .row .field { min-width:0; }
-  .small { padding:6px 9px; font-size:10px; }
-  .status { display:flex; gap:7px; align-items:center; min-height:22px; color:var(--muted); font-size:11px; }
-  .dot { width:7px; height:7px; border-radius:0; background:#ffbd42; box-shadow:0 0 8px currentColor; }
-  .dot.ready { background:var(--green); }
-  progress { width:100%; height:3px; accent-color:var(--green); }
-  .hidden { display:none !important; }
-  main { min-width:0; display:flex; flex-direction:column; height:100vh; background:linear-gradient(#050b07ee,#050b07ee),repeating-linear-gradient(0deg,transparent 0 3px,#42f58408 4px); }
-  header { flex:none; padding:18px 23px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; background:#071009e8; }
-  header h2 { margin:0; color:#c7ffd8; font-size:14px; text-transform:uppercase; letter-spacing:.08em; }
-  header p { margin:2px 0 0; color:var(--muted); font-size:11px; }
-  .secure { color:var(--green); font-size:10px; font-weight:700; text-transform:uppercase; text-shadow:0 0 8px #42f58466; }
-  #history { flex:1; overflow:auto; padding:25px; display:flex; flex-direction:column; gap:14px; scroll-behavior:smooth; }
-  .welcome { margin:auto; max-width:400px; text-align:center; color:var(--muted); }
-  .welcome .lock { font-size:32px; filter:saturate(.7) sepia(1) hue-rotate(75deg); }
-  .welcome h3 { color:var(--green); margin:8px 0 4px; text-transform:uppercase; font-size:15px; }
-  .message { max-width:min(76%,560px); align-self:flex-start; }
-  .message.mine { align-self:flex-end; }
-  .message.system { align-self:center; max-width:90%; }
-  .message.system .bubble { padding:6px 11px; border:1px dashed #28613a; border-radius:2px; background:#061009; color:var(--green); font-size:11px; font-style:italic; }
-  .meta { margin:0 3px 4px; color:#50715a; font-size:10px; text-transform:lowercase; }
-  .message.mine .meta { text-align:right; }
-  .bubble { padding:10px 13px; border:1px solid #1b4a2b; border-radius:2px; background:#0b1710; color:#c7ebd1; overflow-wrap:anywhere; white-space:pre-wrap; box-shadow:3px 3px 0 #07100a; }
-  .mine .bubble { color:#caffda; background:#10351d; border-color:#2a7942; border-radius:2px; }
-  .bubble.file { white-space:normal; display:flex; gap:11px; align-items:center; min-width:235px; }
-  .file-icon { font-size:23px; }
-  .file-info { min-width:0; flex:1; }
-  .file-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
-  .file-size { color:var(--muted); font-size:10px; }
-  .download { color:var(--green); font-weight:700; text-transform:uppercase; font-size:10px; }
-  .bubble.image { display:block; padding:7px; white-space:normal; overflow:hidden; }
-  .image-preview { display:block; max-width:100%; max-height:min(60vh,520px); width:auto; height:auto; border:1px solid #28613a; border-radius:1px; object-fit:contain; background:#010302; image-rendering:auto; }
-  .image-details { display:flex; align-items:center; gap:12px; padding:8px 5px 2px; }
-  .image-details .file-info { flex:1; }
-  .image-details .download { flex:none; padding:6px 9px; border:1px solid currentColor; border-radius:1px; text-decoration:none; }
-  audio { display:block; width:min(320px,60vw); height:38px; filter:invert(1) hue-rotate(85deg) saturate(.7); }
-  .composer { flex:none; position:relative; padding:13px 18px 18px; border-top:1px solid var(--line); background:#071009f5; }
-  .compose-row { display:flex; align-items:flex-end; gap:8px; }
-  #send-text { min-height:43px; max-height:130px; resize:none; padding:10px 12px; }
-  .icon-btn { flex:none; width:43px; height:43px; border:1px solid #28613a; border-radius:2px; background:#08130c; color:var(--green); font-size:18px; box-shadow:2px 2px 0 #102c19; }
-  .icon-btn:hover { border-color:var(--green); }
-  #send-text-btn { background:#123d20; color:var(--green); border-color:var(--green); }
-  #ptt-btn.recording { color:white; border-color:var(--danger); background:#67162a; animation:pulse .7s steps(2,end) infinite; box-shadow:0 0 14px #ff426466; }
-  @keyframes pulse { 50% { opacity:.55; } }
-  .hint { margin:7px 51px 0; color:#50715a; font-size:10px; }
-  #drop-zone { position:absolute; inset:8px; z-index:4; display:grid; place-items:center; border:1px dashed var(--green); border-radius:2px; background:#06170cf2; color:var(--green); font-weight:750; text-transform:uppercase; pointer-events:none; box-shadow:inset 0 0 30px #42f58416; }
-  #incoming { list-style:none; margin:0; padding:0; }
-  #incoming li { margin:8px 0; font-size:11px; }
-  .recv-text { display:block; margin:6px 0; padding:7px; background:#020704; white-space:pre-wrap; max-height:120px; overflow:auto; }
-  #send-file { display:none; }
-  #send-progress { color:var(--muted); font-size:10px; min-height:16px; margin:5px 0 0; }
-  .notice { font-size:10px !important; }
-  .media-actions { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
-  .media-actions .btn:last-child { grid-column:1 / -1; }
-  #media-dock { display:none; min-width:0; height:100vh; border-right:1px solid var(--line); background:#030805; overflow:hidden; }
-  .app.media-open #media-dock { display:flex; flex-direction:column; }
-  #media-dock.expanded { position:fixed; inset:0; z-index:20; width:100vw; height:100vh; border:0; background:#010302; }
-  .media-bar { flex:none; display:flex; align-items:center; gap:8px; padding:10px; border-bottom:1px solid var(--line); background:#071009; }
-  .media-bar strong { flex:1; color:var(--green); font-size:11px; text-transform:uppercase; }
-  .media-bar .btn { padding:5px 7px; }
-  .media-stage { position:relative; flex:1; min-height:0; display:grid; place-items:center; background:#010302; overflow:hidden; }
-  .media-stage::before { content:"RTC LINK ACTIVE"; position:absolute; color:#173c22; font-size:11px; letter-spacing:.12em; }
-  #remote-media { position:relative; z-index:1; width:100%; height:100%; object-fit:contain; background:transparent; }
-  #local-media { position:absolute; z-index:2; right:10px; bottom:10px; width:32%; max-height:28%; border:1px solid var(--green); background:#020503; object-fit:cover; box-shadow:3px 3px 0 #12351e; }
-  .media-status { flex:none; min-height:32px; padding:8px 10px; border-top:1px solid var(--line); color:var(--muted); font-size:10px; }
-  @media (max-width:940px) {
-    .app.media-open { grid-template-columns:260px 1fr; }
-    .app.media-open main { display:none; }
-  }
-  @media (max-width:720px) {
-    .app, .app.media-open { display:block; }
-    #media-dock, .app.media-open #media-dock { height:55vh; border-bottom:1px solid var(--line); }
-    aside { border:0; border-bottom:1px solid var(--line); padding:13px 15px; }
-    .brand { margin:0 0 10px; }
-    .side-section { margin:10px 0; }
-    .side-section.about, #incoming-wrap { display:none; }
-    main { height:calc(100vh - 245px); min-height:420px; }
-    .message { max-width:88%; }
-    #history { padding:17px 13px; }
-  }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#07100a">
+  <title>tailcat.app — temporary encrypted sharing</title>
+  <link rel="icon" href="vendor/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<div class="app">
-  <aside>
-    <div class="brand"><div class="mark">🐈</div><div><h1>Tailcatchat</h1><div class="eyebrow">Encrypted &amp; ephemeral</div></div></div>
+  <a class="skip-link" href="#history" data-i18n="skip_content">Skip to messages</a>
 
-    <div class="side-section">
-      <h2>Your room address</h2>
-      <p>Start listening, then share the ephemeral invite link.</p>
-      <label class="notice"><input type="checkbox" id="persist-key"> Keep this address on this device</label>
-      <p><button id="listen-btn" class="btn primary" disabled>Start encrypted room</button></p>
-      <div id="listen-info" class="hidden">
-        <code id="listen-addr" class="address"></code>
-        <div class="row">
-          <button id="copy-invite" class="btn small primary">Copy link</button>
-          <button id="copy-addr" class="btn small">Copy</button>
-        </div>
-      </div>
+  <section id="browser-blocker" class="browser-blocker hidden" role="alert">
+    <div class="browser-card">
+      <div class="wordmark"><span aria-hidden="true">tc</span> tailcat.app</div>
+      <span class="pill" data-i18n="beta">Public beta</span>
+      <h1 data-i18n="browser_block_title">This browser is not supported</h1>
+      <p data-i18n="browser_block_body">Use desktop Chrome or Edge. Android Chrome is available as a beta and should remain in the foreground while transferring.</p>
+      <p class="muted" data-i18n="browser_block_privacy">No room was started and no invite was sent over the network.</p>
+      <label class="language-field">
+        <span data-i18n="language">Language</span>
+        <select id="blocked-language-select" aria-label="Language">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </label>
     </div>
-
-    <div class="side-section">
-      <h2>Connect to someone</h2>
-      <p>Open an invite link to connect automatically, or paste a Tailcat address.</p>
-      <div class="row"><input type="text" id="send-addr" class="field" placeholder="tc…" autocomplete="off" spellcheck="false"><button id="connect-btn" class="btn small">Set</button></div>
-    </div>
-
-    <div class="side-section">
-      <h2>Live link</h2>
-      <div class="media-actions">
-        <button id="voice-call-btn" class="btn">Voice</button>
-        <button id="video-call-btn" class="btn">Video</button>
-        <button id="screen-share-btn" class="btn">Share screen</button>
-      </div>
-      <p>Live media uses browser WebRTC. Tailcat carries encrypted call setup.</p>
-    </div>
-
-    <div class="side-section about">
-      <p>Messages use Tailcat's end-to-end WireGuard encryption. Browser connections currently travel through a DERP relay.</p>
-    </div>
-
-    <div id="incoming-wrap" class="side-section"><h2>Legacy transfers</h2><ul id="incoming"></ul></div>
-    <div class="status"><span id="status-dot" class="dot"></span><span id="status">Loading WebAssembly…</span></div>
-    <progress id="load-progress" max="1" value="0"></progress>
-  </aside>
-
-  <section id="media-dock" aria-label="Live media">
-    <div class="media-bar">
-      <strong id="media-title">Live link</strong>
-      <button id="media-expand" class="btn" title="Expand">[ ]</button>
-      <button id="media-hangup" class="btn" title="End call">×</button>
-    </div>
-    <div class="media-stage">
-      <video id="remote-media" autoplay playsinline></video>
-      <video id="local-media" autoplay playsinline muted></video>
-    </div>
-    <div id="media-status" class="media-status">connecting…</div>
   </section>
 
-  <main>
-    <header><div><h2>Encrypted room</h2><p id="peer-label">Waiting for a peer address</p></div><div class="secure">● End-to-end encrypted</div></header>
-    <div id="history" aria-live="polite">
-      <div id="welcome" class="welcome"><div class="lock">🔒</div><h3>An encrypted, ephemeral room</h3><div>Start your room and exchange addresses. Then send text, hold to talk, or drop a file.</div></div>
-    </div>
-    <div class="composer" id="composer">
-      <div id="drop-zone" class="hidden">Drop files to send securely</div>
-      <div class="compose-row">
-        <button id="attach-btn" class="icon-btn" title="Attach a file" aria-label="Attach a file">＋</button>
-        <input type="file" id="send-file">
-        <textarea id="send-text" class="field" rows="1" placeholder="Write an encrypted message…"></textarea>
-        <button id="ptt-btn" class="icon-btn" title="Hold to talk" aria-label="Hold to talk">🎙</button>
-        <button id="send-text-btn" class="icon-btn" disabled title="Send message" aria-label="Send message">↑</button>
+  <div id="app" class="app" aria-busy="true">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="tailcat.app">
+        <span class="brand-mark" aria-hidden="true">tc</span>
+        <span><strong>tailcat.app</strong><small data-i18n="tagline">Temporary encrypted sharing</small></span>
+      </a>
+      <div class="top-actions">
+        <span class="pill" data-i18n="beta">Public beta</span>
+        <label class="language-field compact">
+          <span class="sr-only" data-i18n="language">Language</span>
+          <select id="language-select" aria-label="Language">
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
       </div>
-      <div class="hint">Enter sends text · hold Enter in an empty message for PTT · Shift+Enter adds a line</div>
-      <p id="send-progress"></p>
-      <button id="send-btn" class="hidden" disabled>Send file</button>
+    </header>
+
+    <aside class="sidebar" aria-label="Room controls">
+      <section class="panel room-panel">
+        <div class="panel-heading">
+          <span class="step">01</span>
+          <div><h1 data-i18n="room_heading">Your private room</h1><p data-i18n="room_intro">Open a temporary listener, then share its invitation. The room closes after 30 minutes without activity.</p></div>
+        </div>
+
+        <label class="field-label" for="region-select" data-i18n="region_label">Relay region</label>
+        <select id="region-select" class="field"></select>
+        <p class="field-help warning" data-i18n="region_note">Public DERP relays are rate-limited and have no uptime or throughput SLA.</p>
+
+        <label class="check-row">
+          <input type="checkbox" id="persist-key">
+          <span data-i18n="remember_label">Remember this address on this device</span>
+        </label>
+        <p id="persist-risk" class="field-help hidden" data-i18n="remember_risk">Beta feature: the private key stays only in this site's IndexedDB.</p>
+        <button id="forget-key" class="text-button hidden" type="button" data-i18n="forget_address">Forget saved address</button>
+
+        <div class="button-row room-buttons">
+          <button id="listen-btn" class="button primary" type="button" disabled data-i18n="start_room">Open encrypted room</button>
+          <button id="stop-listen-btn" class="button danger hidden" type="button" data-i18n="stop_room">Close room</button>
+        </div>
+
+        <div id="listen-info" class="address-card hidden">
+          <span class="field-label" data-i18n="your_address">Your Tailcat address</span>
+          <code id="listen-addr" class="address" aria-live="polite"></code>
+          <div class="button-row wrap">
+            <button id="copy-invite" class="button small primary" type="button" data-i18n="copy_invite">Copy invite</button>
+            <button id="show-qr" class="button small" type="button" data-i18n="show_qr">Show QR</button>
+            <button id="copy-addr" class="button small" type="button" data-i18n="copy_address">Copy address</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel join-panel">
+        <div class="panel-heading">
+          <span class="step">02</span>
+          <div><h2 data-i18n="join_heading">Join another room</h2><p data-i18n="join_intro">Open an invitation, or paste a Tailcat address here.</p></div>
+        </div>
+        <label class="field-label" for="send-addr" data-i18n="peer_address">Peer Tailcat address</label>
+        <div class="input-action">
+          <input id="send-addr" class="field" type="text" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="tc…">
+          <button id="connect-btn" class="button" type="button" disabled data-i18n="connect">Connect</button>
+        </div>
+      </section>
+
+      <section class="panel status-panel">
+        <h2 data-i18n="connection_heading">Connection</h2>
+        <div class="status-line"><span id="status-dot" class="status-dot loading" aria-hidden="true"></span><span id="status" data-i18n="waiting_transport">Loading encrypted transport…</span></div>
+        <progress id="load-progress" max="1" value="0" aria-label="Loading"></progress>
+        <p id="android-note" class="field-help warning hidden" data-i18n="android_beta">Android Chrome beta · keep this page in the foreground</p>
+        <p class="field-help" data-i18n="encryption_note">Text, files and voice notes use Tailcat's WireGuard end-to-end encryption. Browser traffic currently passes through a DERP relay.</p>
+      </section>
+
+      <section class="panel live-panel">
+        <div class="panel-heading compact-heading"><span class="step">03</span><div><h2 data-i18n="live_heading">Live link</h2></div></div>
+        <div class="live-actions">
+          <button id="voice-call-btn" class="button" type="button" disabled data-i18n="voice_call">Voice call</button>
+          <button id="video-call-btn" class="button" type="button" disabled data-i18n="video_call">Video call</button>
+          <button id="screen-share-btn" class="button" type="button" disabled data-i18n="screen_share">Share screen</button>
+        </div>
+        <p class="field-help" data-i18n="rtc_note">Calls use encrypted WebRTC with Cloudflare STUN only; there is no TURN fallback.</p>
+      </section>
+    </aside>
+
+    <main id="content" class="chat">
+      <header class="chat-header">
+        <div><h2 data-i18n="messages_title">Encrypted room</h2><p id="peer-label" data-i18n="waiting_peer">No peer connected</p></div>
+        <span class="secure-badge"><span aria-hidden="true">●</span> <span data-i18n="secure">End-to-end encrypted</span></span>
+      </header>
+
+      <section id="history" class="history" tabindex="-1" aria-live="polite" aria-label="Messages">
+        <div id="welcome" class="welcome">
+          <span class="welcome-lock" aria-hidden="true">◇</span>
+          <h2 data-i18n="welcome_title">Share only while both people are online</h2>
+          <p data-i18n="welcome_body">Create or join a room. Messages and files are not uploaded or kept by this site; an address key is saved locally only if you opt in.</p>
+          <span class="no-storage" data-i18n="no_storage">No accounts · no server-side history · optional local address key</span>
+        </div>
+      </section>
+
+      <section id="transfer-tray" class="transfer-tray hidden" aria-live="polite">
+        <div class="tray-title"><span data-i18n="transfer_queue">Transfer queue</span><span id="queue-count">0</span></div>
+        <ol id="transfer-list" class="transfer-list"></ol>
+      </section>
+
+      <section id="composer" class="composer">
+        <div id="drop-zone" class="drop-zone hidden" data-i18n="drop_files">Drop files to add them to the queue</div>
+        <div class="compose-row">
+          <button id="attach-btn" class="icon-button" type="button" disabled data-i18n-title="attach" aria-label="Attach files">＋</button>
+          <input id="send-file" type="file" multiple hidden>
+          <textarea id="send-text" class="field message-input" rows="1" maxlength="65536" disabled data-i18n-placeholder="message_placeholder" placeholder="Write an encrypted message…"></textarea>
+          <button id="ptt-btn" class="icon-button" type="button" disabled data-i18n-title="record_voice" aria-label="Hold to record voice note">●</button>
+          <button id="send-text-btn" class="icon-button send" type="button" disabled data-i18n-title="send_message" aria-label="Send message">↑</button>
+        </div>
+        <p class="composer-hint" data-i18n="composer_hint">Enter sends · Shift+Enter adds a line · hold the microphone button to record</p>
+        <p id="send-progress" class="composer-status" aria-live="polite"></p>
+        <button id="send-btn" type="button" hidden disabled>Send file</button>
+      </section>
+    </main>
+
+    <section id="media-dock" class="media-dock hidden" aria-label="Live media">
+      <header class="media-bar">
+        <strong id="media-title" data-i18n="live_link">Live link</strong>
+        <button id="media-expand" class="icon-button compact-icon" type="button" data-i18n-title="expand" aria-label="Expand">□</button>
+        <button id="media-hangup" class="icon-button compact-icon danger" type="button" data-i18n-title="hang_up" aria-label="End call">×</button>
+      </header>
+      <div class="media-stage">
+        <video id="remote-media" autoplay playsinline></video>
+        <video id="local-media" autoplay playsinline muted></video>
+      </div>
+      <p id="media-status" class="media-status" data-i18n="call_connecting">Connecting live link…</p>
+    </section>
+
+    <footer class="footer">
+      <p><strong data-i18n="unofficial">Unofficial project. Not affiliated with or endorsed by Tailscale Inc.</strong></p>
+      <nav aria-label="Policies">
+        <a href="/privacy/" data-i18n="privacy">Privacy</a>
+        <a href="/terms/" data-i18n="terms">Beta terms</a>
+        <a href="/acceptable-use/" data-i18n="acceptable_use">Acceptable use</a>
+        <a href="/security/" data-i18n="security">Security</a>
+        <a href="/licenses/" data-i18n="licenses">Licenses</a>
+        <a href="https://github.com/chaiyalin/tailcat.app" data-i18n="source">Source code</a>
+        <a href="mailto:abuse@tailcat.app" data-i18n="abuse">Report abuse</a>
+      </nav>
+    </footer>
+  </div>
+
+  <dialog id="qr-dialog" class="modal">
+    <div class="modal-card qr-card">
+      <h2 data-i18n="qr_title">Scan to join this room</h2>
+      <p data-i18n="qr_body">The QR code is generated locally in this browser.</p>
+      <canvas id="qr-canvas" width="320" height="320" aria-label="Room invitation QR code"></canvas>
+      <button id="qr-close" class="button primary" type="button" data-i18n="close">Close</button>
     </div>
-  </main>
-</div>
-<script src="wasm_exec.js"></script>
-<script type="module" src="app.js"></script>
+  </dialog>
+
+  <dialog id="incoming-call-dialog" class="modal">
+    <form method="dialog" class="modal-card">
+      <span class="eyebrow" data-i18n="incoming_call">Incoming call</span>
+      <h2 id="incoming-call-description">Incoming call</h2>
+      <p data-i18n="call_permission">Camera or microphone access is requested only after you accept.</p>
+      <div class="button-row end">
+        <button id="decline-call" class="button danger" value="cancel" type="button" data-i18n="decline">Decline</button>
+        <button id="accept-call" class="button primary" value="default" type="button" data-i18n="accept">Accept</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="incoming-file-template">
+    <li class="transfer-item incoming-transfer">
+      <div class="transfer-copy"><strong class="transfer-name"></strong><span class="transfer-detail"></span><progress max="1" value="0"></progress></div>
+      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button></div>
+    </li>
+  </template>
+
+  <script src="wasm_exec.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

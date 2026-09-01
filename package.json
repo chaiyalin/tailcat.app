@@ -1,0 +1,12 @@
+{
+  "name": "tailcat-app",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "PAGES_BUILD=1 ./build.sh dist && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

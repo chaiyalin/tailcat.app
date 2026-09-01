@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="description" content="tailcat.app 安全说明 / Security notes">
+  <title>安全说明 / Security · tailcat.app</title>
+  <link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">tc</span><span>tailcat.app</span></a>
+    <nav class="legal-nav" aria-label="Legal pages">
+      <a href="/privacy/">隐私 / Privacy</a>
+      <a href="/terms/">条款 / Terms</a>
+      <a href="/acceptable-use/">使用规范 / AUP</a>
+      <a href="/security/" aria-current="page">安全 / Security</a>
+      <a href="/licenses/">许可 / Licenses</a>
+    </nav>
+  </header>
+
+  <main class="legal-page">
+    <p class="eyebrow">Security model · 安全模型</p>
+    <h1>安全说明 / Security notes</h1>
+    <p class="lede">加密保护传输中的内容；它不验证对方身份，也不能保护已被控制的终端或危险文件。请在使用前了解边界。</p>
+    <p class="lede" lang="en">Encryption protects content in transit. It does not authenticate the person on the other end or protect a compromised endpoint or a dangerous file. Understand the boundary before use.</p>
+    <p class="updated">更新日期 / Updated: 2026-09-01</p>
+
+    <div class="facts" aria-label="Security facts">
+      <div class="fact"><strong>WireGuard E2EE</strong><span>文字、文件、语音留言和通话信令。</span></div>
+      <div class="fact"><strong>WebRTC DTLS-SRTP</strong><span>实时语音、视频与屏幕媒体。</span></div>
+      <div class="fact"><strong>DERP 元数据 / Metadata</strong><span>中继可见 IP、时间、区域和流量模式。</span></div>
+      <div class="fact"><strong>不扫描 / No scanning</strong><span>内容不经过病毒或恶意软件检查。</span></div>
+    </div>
+
+    <div class="notice warning">
+      <p><strong>公开测试 / Public beta:</strong> Tailcat 协议与线格式可能改变，公共 DERP 限速且无 SLA。不要用本服务传输唯一副本、紧急信息、密钥材料或失败会造成严重损害的数据。</p>
+    </div>
+
+    <div class="language-grid">
+      <section class="language-column" lang="zh-CN">
+        <p class="language-label">中文</p>
+
+        <h2>1. 保护范围</h2>
+        <ul>
+          <li>文字、文件、语音留言以及通话信令在双方 Tailcat 端点之间使用 WireGuard 端到端加密；</li>
+          <li>实时语音、视频和屏幕媒体由浏览器 WebRTC 使用 DTLS-SRTP 加密；</li>
+          <li>网站为静态应用，无账号、消息数据库、文件托管、聊天历史、离线队列或内容恢复；</li>
+          <li>收到文件必须由接收者确认，不应自动下载、打开或预览；完整传输应校验声明大小和 SHA-256。</li>
+        </ul>
+
+        <h2>2. 不在保护范围内</h2>
+        <ul>
+          <li><strong>元数据：</strong>Cloudflare Pages 可处理网页访问元数据；DERP 可观察双方 IP、连接时间、区域、流量大小和模式；</li>
+          <li><strong>WebRTC 地址：</strong>通信对端、STUN 服务和相关网络运营方可能看到你的公网 IP 与连接候选；</li>
+          <li><strong>身份：</strong>持有邀请的人可能连接。加密地址不是实名认证，项目没有账号或身份验证；</li>
+          <li><strong>终端：</strong>恶意软件、浏览器扩展、操作系统、剪贴板、下载目录、截图、录屏和肩窥可在加密边界之外获取数据；</li>
+          <li><strong>对端行为：</strong>对方可以保存、复制、转发或重新录制其收到的内容；</li>
+          <li><strong>文件安全：</strong>本站不做病毒扫描、沙箱执行、内容审核或文件真实性验证。</li>
+        </ul>
+
+        <h2>3. 安全使用建议</h2>
+        <ol>
+          <li>只通过已验证的可信渠道发送完整邀请链接，并在其他渠道确认通信对象；</li>
+          <li>不要公开发布房间地址，不要把持久地址用于陌生人或长期敏感用途；</li>
+          <li>保持浏览器和操作系统更新，仅使用受支持的 Chrome 或 Edge；</li>
+          <li>收到文件时核对发送者、文件名、大小和用途，再保存并用本地安全软件检查；</li>
+          <li>使用后关闭房间。若保存过地址，使用“忘记地址”并在需要时清除本站数据；</li>
+          <li>屏幕共享前关闭通知和敏感窗口，结束后确认浏览器的共享指示器消失；</li>
+          <li>为重要数据保留原始副本和独立备份，不把传输成功提示当作唯一存档。</li>
+        </ol>
+
+        <h2>4. 网络与可用性</h2>
+        <p>浏览器 Tailcat 当前经公共 DERP 中继传输，公开节点限速、尽力而为、无可用性或吞吐量 SLA。实时通话只配置 STUN，不配置 TURN；在对称 NAT、防火墙或企业网络下可能失败。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。</p>
+
+        <h2>5. 浏览器与本地密钥</h2>
+        <p>正式支持桌面 Chrome 和 Edge；Android Chrome 为测试支持并应保持前台。Firefox、Safari 和其他浏览器不在当前支持范围内。临时密钥在页面关闭或超时后停止使用；主动保存的地址私钥只应进入本站来源的 IndexedDB，并可由用户忘记或通过清除站点数据删除。</p>
+
+        <h2>6. 报告安全问题</h2>
+        <p>请把可复现步骤、受影响版本、预期与实际结果、影响评估和最小化的证明发送至 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。不要发送真实私钥、完整邀请、第三方个人数据、非法内容或可直接利用生产用户的攻击代码。请先给予合理修复时间再公开披露。</p>
+        <p>本项目暂不承诺漏洞赏金、响应时间或安全港。测试应遵守法律、<a href="/acceptable-use/">可接受使用政策</a>，并避免自动扫描、拒绝服务、持久化访问或接触其他用户内容。</p>
+
+        <h2>7. 滥用事件</h2>
+        <p>若是骚扰、恶意文件、非法内容或其他使用问题，也请联系 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。由于内容端到端加密且无账号或历史数据库，可调查证据有限。紧迫危险请联系当地紧急服务。</p>
+      </section>
+
+      <section class="language-column" lang="en">
+        <p class="language-label">English</p>
+
+        <h2>1. What is protected</h2>
+        <ul>
+          <li>Text, files, voice notes, and call signaling use WireGuard end-to-end encryption between Tailcat endpoints;</li>
+          <li>Live audio, video, and display media is encrypted by browser WebRTC with DTLS-SRTP;</li>
+          <li>The site is static and has no account, message database, file hosting, chat history, offline queue, or content recovery; and</li>
+          <li>A received file must be approved by the recipient and should not be downloaded, opened, or previewed automatically; a complete transfer should verify declared size and SHA-256.</li>
+        </ul>
+
+        <h2>2. What is not protected</h2>
+        <ul>
+          <li><strong>Metadata:</strong> Cloudflare Pages can process site-access metadata; DERP can observe peer IPs, connection time, region, traffic volume, and traffic patterns;</li>
+          <li><strong>WebRTC addresses:</strong> Your peer, the STUN service, and relevant network operators may see your public IP address and connection candidates;</li>
+          <li><strong>Identity:</strong> A person holding an invitation may connect. An encrypted address is not verified identity, and the project has no account or identity service;</li>
+          <li><strong>Endpoints:</strong> Malware, browser extensions, the operating system, clipboard, downloads, screenshots, recordings, and shoulder surfing can expose data outside the encryption boundary;</li>
+          <li><strong>Peer behavior:</strong> A peer can save, copy, forward, or re-record anything received; and</li>
+          <li><strong>File safety:</strong> The site performs no malware scan, sandbox execution, content moderation, or authenticity check.</li>
+        </ul>
+
+        <h2>3. Safer use</h2>
+        <ol>
+          <li>Send a complete invitation only through a verified, trusted channel, and confirm your intended peer out of band;</li>
+          <li>Do not post room addresses publicly or reuse a persistent address with strangers or for long-lived sensitive work;</li>
+          <li>Keep the browser and operating system current, and use a supported Chrome or Edge browser;</li>
+          <li>Before saving a file, confirm its sender, name, size, and purpose, then inspect it with local security software;</li>
+          <li>Close the room after use. If you saved an address, use “forget address” and clear site data when appropriate;</li>
+          <li>Before screen sharing, close notifications and sensitive windows, and verify the browser's sharing indicator is gone afterward; and</li>
+          <li>Keep originals and independent backups of important data; never treat a transfer-success message as your only archive.</li>
+        </ol>
+
+        <h2>4. Network and availability</h2>
+        <p>Browser Tailcat traffic currently uses public DERP relays, which are rate-limited, best-effort, and have no uptime or throughput SLA. Live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent a call. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer.</p>
+
+        <h2>5. Browsers and local keys</h2>
+        <p>Desktop Chrome and Edge are supported; Android Chrome is beta and should remain in the foreground. Firefox, Safari, and other browsers are outside current support. Ephemeral keys stop being used when the page closes or times out. A deliberately remembered address key should exist only in this origin's IndexedDB and can be removed with “forget address” or by clearing site data.</p>
+
+        <h2>6. Reporting a security issue</h2>
+        <p>Send reproducible steps, affected version, expected and actual behavior, impact assessment, and a minimal proof to <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>. Do not send real private keys, complete invitations, third-party personal data, illegal content, or exploit code that directly endangers production users. Allow reasonable time for a fix before public disclosure.</p>
+        <p>The project does not currently promise a bounty, response time, or safe harbor. Testing must follow the law and <a href="/acceptable-use/">Acceptable Use Policy</a> and avoid automated scanning, denial of service, persistent access, or access to another user's content.</p>
+
+        <h2>7. Abuse incidents</h2>
+        <p>For harassment, malicious files, illegal content, or other use issues, also contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>. End-to-end encryption and the absence of accounts or a history database limit available evidence. Contact local emergency services for immediate danger.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <p>非 Tailscale 官方项目，未获得其关联或背书。</p>
+    <p>Unofficial project. Not affiliated with or endorsed by Tailscale Inc.</p>
+    <p><a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a></p>
+  </footer>
+</body>
+</html>

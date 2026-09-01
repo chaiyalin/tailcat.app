@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.0
+          check-latest: false
+          cache: true
+
+      - name: Verify pinned dependencies
+        shell: bash
+        run: |
+          go mod download
+          go mod verify
+          test "$(go list -m -f '{{.Version}}' github.com/tailscale/tailcat)" = "v0.4.0"
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Check source formatting and build script
+        shell: bash
+        run: |
+          test -z "$(gofmt -l -- *.go)"
+          bash -n build.sh
+
+      - name: Test the WebAssembly package
+        env:
+          GOOS: js
+          GOARCH: wasm
+        run: go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
+
+      - name: Build the Cloudflare Pages artifact
+        env:
+          PAGES_BUILD: "1"
+        run: ./build.sh dist
+
+      - name: Enforce Cloudflare Pages artifact limits
+        shell: bash
+        run: |
+          for required in index.html app.js wasm_exec.js main.wasm.gz LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
+            test -s "dist/$required"
+          done
+          test ! -e dist/main.wasm
+          oversized="$(find dist -type f -size +26214400c -print)"
+          if [[ -n "$oversized" ]]; then
+            echo "Cloudflare Pages files must not exceed 25 MiB:" >&2
+            echo "$oversized" >&2
+            exit 1
+          fi
+          if [[ -f dist/_headers ]] && grep -Eqi '^[[:space:]]*Content-Encoding[[:space:]]*:[[:space:]]*gzip[[:space:]]*$' dist/_headers; then
+            echo "main.wasm.gz is decompressed by the browser and must not be served with Content-Encoding: gzip" >&2
+            exit 1
+          fi
+          grep -Eq '^/main\.wasm\.gz[[:space:]]*$' dist/_headers
+          grep -Eqi '^[[:space:]]*Content-Type[[:space:]]*:[[:space:]]*application/gzip[[:space:]]*$' dist/_headers
+          grep -Eqi '^[[:space:]]*![[:space:]]*Content-Encoding[[:space:]]*$' dist/_headers
+          grep -Eqi 'X-Robots-Tag:[[:space:]]*noindex' dist/_headers
+          grep -Eqi "Content-Security-Policy:.*frame-ancestors 'none'.*object-src 'none'" dist/_headers
+
+  browser-e2e:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.0
+          check-latest: false
+          cache: true
+
+      - name: Require the browser E2E test contract
+        shell: bash
+        run: |
+          test -f package.json
+          test -f package-lock.json
+          node -e 'const p = require("./package.json"); if (!p.scripts?.["test:e2e"]) process.exit(1)'
+
+      - name: Install test dependencies
+        run: npm ci
+
+      - name: Install supported browser channels
+        run: npx playwright install --with-deps chrome msedge
+
+      - name: Run Chrome and Edge end-to-end tests
+        run: npm run test:e2e

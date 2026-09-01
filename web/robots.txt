@@ -1,0 +1,3 @@
+# Public beta: crawling is disabled. HTTP responses also carry X-Robots-Tag: noindex.
+User-agent: *
+Disallow: /

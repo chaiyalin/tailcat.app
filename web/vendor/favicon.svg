@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="tailcat.app">
+  <rect width="64" height="64" rx="15" fill="#0f3820"/>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="none" stroke="#69f49b" stroke-width="2"/>
+  <path d="M17 24h8v-7h6v7h8v6h-8v11c0 4 2 6 6 6h2v6h-4c-7 0-10-4-10-11V30h-8zm30 7c-4 0-6 3-6 8s2 8 6 8c2 0 4-1 6-3v7c-2 1-4 2-7 2-8 0-12-6-12-14s5-14 13-14c3 0 5 1 7 2v7c-2-2-4-3-7-3z" fill="#69f49b"/>
+</svg>
