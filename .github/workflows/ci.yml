@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/mobile-support]
   pull_request:
   workflow_dispatch:
 
@@ -55,7 +55,7 @@ jobs:
       - name: Enforce Cloudflare Pages artifact limits
         shell: bash
         run: |
-          for required in index.html app.js wasm_exec.js main.wasm.gz LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
+          for required in index.html app.js file-sinks.js mobile-runtime.js opfs-worker.js wasm_exec.js main.wasm.gz LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
             test -s "dist/$required"
           done
           test ! -e dist/main.wasm
@@ -104,7 +104,7 @@ jobs:
         run: npm ci
 
       - name: Install supported browser channels
-        run: npx playwright install --with-deps chrome msedge
+        run: npx playwright install --with-deps chrome msedge webkit
 
-      - name: Run Chrome and Edge end-to-end tests
+      - name: Run desktop and mobile-browser end-to-end tests
         run: npm run test:e2e

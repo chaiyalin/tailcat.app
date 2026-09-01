@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
   <meta name="robots" content="noindex,nofollow,noarchive">
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#07100a">
@@ -20,6 +20,10 @@
       <h1 data-i18n="browser_block_title">This browser is not supported</h1>
       <p data-i18n="browser_block_body">Use desktop Chrome or Edge. Android Chrome is available as a beta and should remain in the foreground while transferring.</p>
       <p class="muted" data-i18n="browser_block_privacy">No room was started and no invite was sent over the network.</p>
+      <div id="blocked-invite-copy" class="hidden">
+        <p class="muted" data-i18n="invite_preserved">The invitation is still available in this page's memory. Copy it and open it in a supported browser.</p>
+        <button id="copy-blocked-invite" class="button primary" type="button" data-i18n="copy_preserved_invite">Copy invitation</button>
+      </div>
       <label class="language-field">
         <span data-i18n="language">Language</span>
         <select id="blocked-language-select" aria-label="Language">
@@ -30,7 +34,7 @@
     </div>
   </section>
 
-  <div id="app" class="app" aria-busy="true">
+  <div id="app" class="app" data-mobile-state="landing" data-mobile-sheet="closed" aria-busy="true">
     <header class="topbar">
       <a class="brand" href="/" aria-label="tailcat.app">
         <span class="brand-mark" aria-hidden="true">tc</span>
@@ -45,36 +49,50 @@
             <option value="en">English</option>
           </select>
         </label>
+        <button id="mobile-menu-btn" class="icon-button compact-icon mobile-menu-button mobile-only" type="button" data-i18n-title="open_controls" aria-label="Open room controls" aria-controls="mobile-controls-sheet" aria-expanded="false">•••</button>
       </div>
     </header>
 
-    <aside class="sidebar" aria-label="Room controls">
+    <aside id="mobile-controls-sheet" class="sidebar" aria-label="Room controls">
+      <header class="mobile-sheet-header mobile-only">
+        <strong id="mobile-controls-title" data-i18n="room_controls">Room controls</strong>
+        <button id="mobile-sheet-close" class="icon-button compact-icon" type="button" data-i18n-title="close_controls" aria-label="Close room controls">×</button>
+      </header>
+
       <section class="panel room-panel">
         <div class="panel-heading">
           <span class="step">01</span>
           <div><h1 data-i18n="room_heading">Your private room</h1><p data-i18n="room_intro">Open a temporary listener, then share its invitation. The room closes after 30 minutes without activity.</p></div>
         </div>
 
-        <label class="field-label" for="region-select" data-i18n="region_label">Relay region</label>
-        <select id="region-select" class="field"></select>
-        <p class="field-help warning" data-i18n="region_note">Public DERP relays are rate-limited and have no uptime or throughput SLA.</p>
+        <div class="room-settings">
+          <label class="field-label" for="region-select" data-i18n="region_label">Relay region</label>
+          <select id="region-select" class="field"></select>
+          <p class="field-help warning" data-i18n="region_note">Public DERP relays are rate-limited and have no uptime or throughput SLA.</p>
 
-        <label class="check-row">
-          <input type="checkbox" id="persist-key">
-          <span data-i18n="remember_label">Remember this address on this device</span>
-        </label>
-        <p id="persist-risk" class="field-help hidden" data-i18n="remember_risk">Beta feature: the private key stays only in this site's IndexedDB.</p>
-        <button id="forget-key" class="text-button hidden" type="button" data-i18n="forget_address">Forget saved address</button>
+          <label class="check-row">
+            <input type="checkbox" id="persist-key">
+            <span data-i18n="remember_label">Remember this address on this device</span>
+          </label>
+          <p id="persist-risk" class="field-help hidden" data-i18n="remember_risk">Beta feature: the private key stays only in this site's IndexedDB.</p>
+          <p id="persistent-unavailable" class="field-help warning hidden" data-i18n="persistent_unavailable">This browser cannot save an address; this room will remain temporary.</p>
+          <button id="forget-key" class="text-button hidden" type="button" data-i18n="forget_address">Forget saved address</button>
 
-        <div class="button-row room-buttons">
-          <button id="listen-btn" class="button primary" type="button" disabled data-i18n="start_room">Open encrypted room</button>
-          <button id="stop-listen-btn" class="button danger hidden" type="button" data-i18n="stop_room">Close room</button>
+          <div class="button-row room-buttons">
+            <button id="listen-btn" class="button primary" type="button" disabled data-i18n="start_room">Open encrypted room</button>
+            <button id="stop-listen-btn" class="button danger hidden" type="button" data-i18n="stop_room">Close room</button>
+          </div>
         </div>
 
         <div id="listen-info" class="address-card hidden">
+          <div class="mobile-invite-heading mobile-only">
+            <span class="invite-ready-mark" aria-hidden="true">✓</span>
+            <div><strong data-i18n="invite_ready">Invitation ready</strong><p data-i18n="invite_ready_body">Share it with one person, then keep this page open.</p></div>
+          </div>
           <span class="field-label" data-i18n="your_address">Your Tailcat address</span>
           <code id="listen-addr" class="address" aria-live="polite"></code>
           <div class="button-row wrap">
+            <button id="share-invite" class="button small primary mobile-only" type="button" data-i18n="native_share">Share invite</button>
             <button id="copy-invite" class="button small primary" type="button" data-i18n="copy_invite">Copy invite</button>
             <button id="show-qr" class="button small" type="button" data-i18n="show_qr">Show QR</button>
             <button id="copy-addr" class="button small" type="button" data-i18n="copy_address">Copy address</button>
@@ -99,6 +117,9 @@
         <div class="status-line"><span id="status-dot" class="status-dot loading" aria-hidden="true"></span><span id="status" data-i18n="waiting_transport">Loading encrypted transport…</span></div>
         <progress id="load-progress" max="1" value="0" aria-label="Loading"></progress>
         <p id="android-note" class="field-help warning hidden" data-i18n="android_beta">Android Chrome beta · keep this page in the foreground</p>
+        <p id="ios-note" class="field-help warning hidden" data-i18n="ios_beta">iOS Safari beta · keep this page in the foreground</p>
+        <p id="capability-note" class="capability-note field-help warning hidden" role="status"></p>
+        <p id="background-risk" class="background-risk field-help warning hidden" role="alert" data-i18n="background_risk">Keep this page in the foreground. Locking the device or switching apps may interrupt the room or a transfer.</p>
         <p class="field-help" data-i18n="encryption_note">Text, files and voice notes use Tailcat's WireGuard end-to-end encryption. Browser traffic currently passes through a DERP relay.</p>
       </section>
 
@@ -112,6 +133,7 @@
         <p class="field-help" data-i18n="rtc_note">Calls use encrypted WebRTC with Cloudflare STUN only; there is no TURN fallback.</p>
       </section>
     </aside>
+    <button id="mobile-sheet-backdrop" class="mobile-sheet-backdrop mobile-only" type="button" data-i18n-title="close_controls" aria-label="Close room controls" tabindex="-1"></button>
 
     <main id="content" class="chat">
       <header class="chat-header">
@@ -142,6 +164,13 @@
           <button id="ptt-btn" class="icon-button" type="button" disabled data-i18n-title="record_voice" aria-label="Hold to record voice note">●</button>
           <button id="send-text-btn" class="icon-button send" type="button" disabled data-i18n-title="send_message" aria-label="Send message">↑</button>
         </div>
+        <div id="mobile-recording-controls" class="mobile-recording-controls mobile-only hidden" role="group" aria-label="Voice note recording">
+          <span class="mobile-recording-status"><span class="recording-dot" aria-hidden="true"></span><span id="mobile-recording-label" data-i18n="voice_tap_stop">Recording · tap Send or Cancel</span></span>
+          <div class="button-row">
+            <button id="mobile-record-cancel" class="button danger" type="button" data-i18n="cancel">Cancel</button>
+            <button id="mobile-record-send" class="button primary" type="button" data-i18n="send_voice">Send voice note</button>
+          </div>
+        </div>
         <p class="composer-hint" data-i18n="composer_hint">Enter sends · Shift+Enter adds a line · hold the microphone button to record</p>
         <p id="send-progress" class="composer-status" aria-live="polite"></p>
         <button id="send-btn" type="button" hidden disabled>Send file</button>
@@ -152,6 +181,9 @@
       <header class="media-bar">
         <strong id="media-title" data-i18n="live_link">Live link</strong>
         <button id="media-expand" class="icon-button compact-icon" type="button" data-i18n-title="expand" aria-label="Expand">□</button>
+        <button id="media-mute" class="icon-button compact-icon media-control-button" type="button" data-i18n-title="call_mute" aria-label="Mute microphone" aria-pressed="false"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"></path></svg></button>
+        <button id="media-camera" class="icon-button compact-icon media-control-button" type="button" data-i18n-title="camera_off" aria-label="Turn camera off" aria-pressed="false"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"></rect><path d="m15 10 6-3v10l-6-3"></path></svg></button>
+        <button id="media-switch-camera" class="icon-button compact-icon media-control-button hidden" type="button" data-i18n-title="switch_camera" aria-label="Switch camera"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9a8 8 0 0 1 13-3l2 2M20 15a8 8 0 0 1-13 3l-2-2M19 3v5h-5M5 21v-5h5"></path></svg></button>
         <button id="media-hangup" class="icon-button compact-icon danger" type="button" data-i18n-title="hang_up" aria-label="End call">×</button>
       </header>
       <div class="media-stage">
@@ -198,8 +230,8 @@
 
   <template id="incoming-file-template">
     <li class="transfer-item incoming-transfer">
-      <div class="transfer-copy"><strong class="transfer-name"></strong><span class="transfer-detail"></span><progress max="1" value="0"></progress></div>
-      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button></div>
+      <div class="transfer-copy"><strong class="transfer-name"></strong><span class="transfer-detail"></span><progress max="1" value="0"></progress><span class="transfer-local-note hidden"></span></div>
+      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button><button class="button small primary export-file hidden" type="button"></button><button class="button small danger delete-file hidden" type="button"></button></div>
     </li>
   </template>
 

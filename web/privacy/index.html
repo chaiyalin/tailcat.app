@@ -29,7 +29,7 @@
 
     <div class="facts" aria-label="Key privacy facts">
       <div class="fact"><strong>无账号 / No accounts</strong><span>无需注册、登录或提供用户资料。</span></div>
-      <div class="fact"><strong>无内容存储 / No content storage</strong><span>本站没有消息、文件或语音留言数据库。</span></div>
+      <div class="fact"><strong>无服务端内容存储 / No server content store</strong><span>本站没有消息、文件或语音留言数据库。</span></div>
       <div class="fact"><strong>无历史 / No history</strong><span>没有云端聊天记录、备份或离线投递队列。</span></div>
       <div class="fact"><strong>不做病毒扫描 / No malware scanning</strong><span>接收文件前请确认发送者，并在本地检查。</span></div>
     </div>
@@ -46,7 +46,7 @@
         <p>tailcat.app 是独立的非官方开源测试项目，不是 Tailscale Inc. 的产品，也未获得其关联或背书。隐私或滥用问题可联系 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。</p>
 
         <h2>2. 本站不建立哪些数据</h2>
-        <p>本站不要求账号，不建立用户档案，也没有用于保存文字、文件、语音留言、房间成员或聊天历史的应用数据库。我们不提供离线存储、稍后下载、云端备份、内容恢复或病毒扫描。</p>
+        <p>本站不要求账号，不建立用户档案，也没有用于保存文字、文件、语音留言、房间成员或聊天历史的服务端应用数据库。我们不提供离线投递、稍后从服务器下载、云端备份、内容恢复或病毒扫描。iOS Safari 接收文件时可能使用仅属于本站来源的浏览器私有临时存储，具体见第 6 节。</p>
         <p>首版不加载第三方分析脚本、第三方字体或远程错误上报。Cloudflare Web Analytics 在公开测试版中关闭。</p>
 
         <h2>3. 打开网页时</h2>
@@ -59,10 +59,11 @@
 
         <h2>5. 实时语音、视频和屏幕共享</h2>
         <p>实时媒体使用浏览器 WebRTC；Tailcat 只承载加密的通话信令。STUN 用于发现网络路径，不配置 TURN。通信对端、STUN 服务以及相关网络运营方可能看到你的公网 IP 和连接候选信息。受限网络下，通话可能失败，即使 DERP 上的文字和文件仍可工作。</p>
-        <p>摄像头、麦克风和屏幕只会在你主动操作并授权后访问。浏览器会显示权限与共享状态；你可以随时拒绝权限或停止共享。</p>
+        <p>摄像头、麦克风和屏幕只会在你主动操作并授权后访问。浏览器会显示权限与共享状态；你可以随时拒绝权限或停止共享。移动端切换应用、锁屏或被系统暂停时，房间、传输或通话可能结束；本站不提供后台传输或断点续传。</p>
 
         <h2>6. 设备上的数据</h2>
-        <p>临时房间密钥默认只在当前页面生命周期内使用。若你主动开启“记住此地址”，私钥会保存在本站来源的 IndexedDB 中，直到你使用“忘记地址”、清除本站数据或浏览器移除它。界面语言偏好保存在本站来源的 <code>localStorage</code>。收到的文件只会在你确认后写入你选择的本地位置。</p>
+        <p>临时房间密钥默认只在当前页面生命周期内使用。若你主动开启“记住此地址”，私钥会保存在本站来源的 IndexedDB 中，直到你使用“忘记地址”、清除本站数据或浏览器移除它。若 IndexedDB 不可用，地址保持临时且语言偏好也可能无法保留。</p>
+        <p>Android Chrome 会在你确认并选择系统保存位置后直接流式写入。iOS Safari 会在你确认后，以随机传输编号把文件分块写入本站来源的 Origin Private File System（OPFS），完成大小与 SHA-256 校验后，再由你主动分享到“文件”或其他应用。原始文件名不会用作 OPFS 路径。成功导出、用户取消分享、传输取消、校验失败或写入失败后，应用会删除临时副本；若系统分享因其他错误失败，临时副本会保留以便本地下载或手动删除。应用会在下次启动时清理异常退出留下的传输项；你也可以使用“删除本地副本”或清除本站数据。浏览器仍可能因崩溃、存储故障或平台限制暂时保留数据。</p>
         <p>任何通信对端都可以保存其收到的内容。我们无法从对方设备删除消息、录音、文件或截图。</p>
 
         <h2>7. 保留、控制与选择</h2>
@@ -82,7 +83,7 @@
         <p>tailcat.app is an independent, unofficial open-source beta. It is not a Tailscale Inc. product and is not affiliated with or endorsed by Tailscale. For privacy or abuse questions, contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>.</p>
 
         <h2>2. Data the app does not create</h2>
-        <p>The site requires no account, creates no user profile, and has no application database for text, files, voice notes, room members, or chat history. We do not provide offline storage, later retrieval, cloud backups, content recovery, or malware scanning.</p>
+        <p>The site requires no account, creates no user profile, and has no server-side application database for text, files, voice notes, room members, or chat history. We do not provide offline delivery, later server retrieval, cloud backups, content recovery, or malware scanning. iOS Safari may use origin-private temporary browser storage while receiving a file, as described in section 6.</p>
         <p>The initial beta loads no third-party analytics scripts, remote fonts, or remote error reporting. Cloudflare Web Analytics is disabled.</p>
 
         <h2>3. When you open the site</h2>
@@ -95,10 +96,11 @@
 
         <h2>5. Live audio, video, and screen sharing</h2>
         <p>Live media uses browser WebRTC; Tailcat carries only encrypted call signaling. STUN assists path discovery and no TURN fallback is configured. Your peer, the STUN service, and relevant network operators may see your public IP address and connection candidates. Calls can fail on restrictive networks even when DERP-relayed text and files still work.</p>
-        <p>Camera, microphone, and display access begins only after your action and browser permission. Your browser shows permission and sharing state, and you can deny permission or stop sharing at any time.</p>
+        <p>Camera, microphone, and display access begins only after your action and browser permission. Your browser shows permission and sharing state, and you can deny permission or stop sharing at any time. On mobile, changing apps, locking the device, or operating-system suspension may end a room, transfer, or call; the site provides neither background transfer nor resumable files.</p>
 
         <h2>6. Data on your device</h2>
-        <p>By default, an ephemeral room key is used only for the current page lifetime. If you enable “remember this address,” the private key is stored in IndexedDB for this origin until you choose “forget address,” clear site data, or the browser removes it. The interface-language preference is stored in this origin's <code>localStorage</code>. A received file is written only after you approve it and choose a local destination.</p>
+        <p>By default, an ephemeral room key is used only for the current page lifetime. If you enable “remember this address,” the private key is stored in IndexedDB for this origin until you choose “forget address,” clear site data, or the browser removes it. If IndexedDB is unavailable, the address remains ephemeral and the language preference may also be unavailable.</p>
+        <p>Android Chrome streams an incoming file only after you approve it and choose a system destination. On iOS Safari, approval allows chunks to be written under a random transfer identifier in this origin's Origin Private File System (OPFS). After size and SHA-256 verification, a second action shares the file to Files or another app. The offered file name is never used as the OPFS path. The app deletes the temporary copy after successful export, user-cancelled sharing, transfer cancellation, verification failure, or write failure. If system sharing fails for another reason, the copy remains available for local download or manual deletion. The app cleans abandoned transfer entries on its next start and offers “delete local copy”; clearing site data also removes it. A crash, storage fault, or platform limitation may delay cleanup.</p>
         <p>Any peer can keep content they receive. We cannot delete messages, recordings, files, or screenshots from another person's device.</p>
 
         <h2>7. Retention, controls, and choices</h2>

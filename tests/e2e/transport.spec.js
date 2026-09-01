@@ -193,7 +193,7 @@ test("streams 0 B, 1 B, 64 KiB, and 100 MiB boundaries without whole-file fallba
       const offer = receiver.locator(".incoming-transfer", { hasText: name });
       await expect(offer).toBeVisible();
       await offer.locator(".save-file").click();
-      await expect(sender.locator(".transfer-item", { hasText: name })).toContainText(/saved and verified/i);
+      await expect(sender.locator(".transfer-item", { hasText: name })).toContainText(/received and SHA-256 verified/i);
       await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvSha256)).toBe(expectedDigest);
       await expect.poll(() => receiver.evaluate(() => globalThis.__mockSave.totalBytes)).toBe(cumulativeBytes);
       expect(await receiver.evaluate(() => globalThis.tcTest.recvBytes)).toBe(size);
@@ -257,7 +257,7 @@ test("continues the ordered file queue after one item is rejected", async ({ bro
     const second = receiver.locator(".incoming-transfer", { hasText: "queue-second.bin" });
     await expect(second).toBeVisible();
     await second.locator(".save-file").click();
-    await expect(sender.locator(".transfer-item", { hasText: "queue-second.bin" })).toContainText(/saved and verified/i);
+    await expect(sender.locator(".transfer-item", { hasText: "queue-second.bin" })).toContainText(/received and SHA-256 verified/i);
     expect(await receiver.evaluate(() => globalThis.__mockSave.totalBytes)).toBe(6);
   } finally {
     await context.close();

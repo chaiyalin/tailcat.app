@@ -24,6 +24,23 @@ test("loads the local-only application shell and WASM bridge", async ({ page }) 
   expect(remoteScripts).toEqual([]);
 });
 
+test("keeps the desktop shell usable in a narrow non-touch window", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.goto("/");
+  await waitForTransport(page);
+
+  const layout = await page.evaluate(() => ({
+    appDisplay: getComputedStyle(document.getElementById("app")).display,
+    menuDisplay: getComputedStyle(document.getElementById("mobile-menu-btn")).display,
+    bodyOverflow: getComputedStyle(document.body).overflow,
+  }));
+  expect(layout).toEqual({
+    appDisplay: "grid",
+    menuDisplay: "none",
+    bodyOverflow: "visible",
+  });
+});
+
 test("consumes an invitation fragment before any request can contain it", async ({ page }) => {
   const requestedURLs = [];
   page.on("request", (request) => requestedURLs.push(request.url()));
@@ -52,30 +69,38 @@ test("passes deterministic protocol and boundary self-checks", async ({ page }) 
   ]));
 });
 
-test("blocks Safari before starting an encrypted room", async ({ browser }) => {
-  const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
-  });
-  const page = await context.newPage();
-  await page.goto("/");
+test("uses UA only as a support label when core capabilities are present", async ({ browser }) => {
+  for (const userAgent of [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0",
+  ]) {
+    const context = await browser.newContext({ userAgent });
+    const page = await context.newPage();
+    await page.goto("/");
+    await waitForTransport(page);
 
-  await expect(page.locator("#browser-blocker")).not.toHaveClass(/hidden/);
-  await expect(page.locator("#app")).toHaveClass(/hidden/);
-  expect(await page.evaluate(() => globalThis.tcTest?.unsupported)).toBe(true);
-  expect(await page.evaluate(() => globalThis.tcTest?.listenerStarted || false)).toBe(false);
-  await context.close();
+    await expect(page.locator("#browser-blocker")).toHaveClass(/hidden/);
+    await expect(page.locator("#app")).not.toHaveClass(/hidden/);
+    await expect(page.locator("#capability-note")).toContainText(/Limited mode|受限模式/);
+    expect(await page.evaluate(() => globalThis.tcTest.runtime.coreReady)).toBe(true);
+    await context.close();
+  }
 });
 
-test("blocks Firefox before starting an encrypted room", async ({ browser }) => {
-  const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0",
+test("blocks a missing core capability and keeps the consumed invite copyable", async ({ browser }) => {
+  const context = await browser.newContext();
+  await context.addInitScript(() => {
+    Object.defineProperty(globalThis, "DecompressionStream", { configurable: true, value: undefined });
   });
   const page = await context.newPage();
-  await page.goto("/");
+  const invite = `tc${"a".repeat(64)}`;
+  await page.goto(`/#v=1&invite=${invite}`);
 
   await expect(page.locator("#browser-blocker")).not.toHaveClass(/hidden/);
   await expect(page.locator("#app")).toHaveClass(/hidden/);
-  expect(await page.evaluate(() => globalThis.tcTest?.unsupported)).toBe(true);
+  await expect(page.locator("#blocked-invite-copy")).not.toHaveClass(/hidden/);
+  expect(await page.evaluate(() => location.hash)).toBe("");
+  expect(await page.evaluate(() => globalThis.tcTest.runtime.missing)).toContain("decompressionStream");
   expect(await page.evaluate(() => globalThis.tcTest?.listenerStarted || false)).toBe(false);
   await context.close();
 });

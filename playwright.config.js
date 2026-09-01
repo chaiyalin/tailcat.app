@@ -22,7 +22,31 @@ export default defineConfig({
     timeout: 30_000,
   },
   projects: [
-    { name: "chrome", use: { channel: "chrome" } },
-    { name: "edge", use: { channel: "msedge" } },
+    { name: "chrome", testIgnore: /mobile\.spec\.js/u, use: { channel: "chrome" } },
+    { name: "edge", testIgnore: /mobile\.spec\.js/u, use: { channel: "msedge" } },
+    {
+      name: "android-chrome",
+      testMatch: /mobile\.spec\.js/u,
+      use: {
+        channel: "chrome",
+        userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
+        viewport: { width: 412, height: 915 },
+        deviceScaleFactor: 2.625,
+        hasTouch: true,
+        isMobile: true,
+      },
+    },
+    {
+      name: "ios-safari",
+      testMatch: /mobile\.spec\.js/u,
+      use: {
+        browserName: "webkit",
+        userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+        viewport: { width: 390, height: 844 },
+        deviceScaleFactor: 3,
+        hasTouch: true,
+        isMobile: true,
+      },
+    },
   ],
 });

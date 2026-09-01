@@ -47,7 +47,7 @@
           <li>文字、文件、语音留言以及通话信令在双方 Tailcat 端点之间使用 WireGuard 端到端加密；</li>
           <li>实时语音、视频和屏幕媒体由浏览器 WebRTC 使用 DTLS-SRTP 加密；</li>
           <li>网站为静态应用，无账号、消息数据库、文件托管、聊天历史、离线队列或内容恢复；</li>
-          <li>收到文件必须由接收者确认，不应自动下载、打开或预览；完整传输应校验声明大小和 SHA-256。</li>
+          <li>收到文件必须由接收者确认，不应自动打开或预览；完整传输应校验声明大小和 SHA-256。iOS 上通过校验的 OPFS 临时文件仍需用户再次操作才能导出。</li>
         </ul>
 
         <h2>2. 不在保护范围内</h2>
@@ -64,7 +64,7 @@
         <ol>
           <li>只通过已验证的可信渠道发送完整邀请链接，并在其他渠道确认通信对象；</li>
           <li>不要公开发布房间地址，不要把持久地址用于陌生人或长期敏感用途；</li>
-          <li>保持浏览器和操作系统更新，仅使用受支持的 Chrome 或 Edge；</li>
+          <li>保持浏览器和操作系统更新，仅使用受支持的桌面 Chrome/Edge、Android Chrome 132+ 或 iOS Safari 17+；</li>
           <li>收到文件时核对发送者、文件名、大小和用途，再保存并用本地安全软件检查；</li>
           <li>使用后关闭房间。若保存过地址，使用“忘记地址”并在需要时清除本站数据；</li>
           <li>屏幕共享前关闭通知和敏感窗口，结束后确认浏览器的共享指示器消失；</li>
@@ -72,10 +72,11 @@
         </ol>
 
         <h2>4. 网络与可用性</h2>
-        <p>浏览器 Tailcat 当前经公共 DERP 中继传输，公开节点限速、尽力而为、无可用性或吞吐量 SLA。实时通话只配置 STUN，不配置 TURN；在对称 NAT、防火墙或企业网络下可能失败。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。</p>
+        <p>浏览器 Tailcat 当前经公共 DERP 中继传输，公开节点限速、尽力而为、无可用性或吞吐量 SLA。实时通话只配置 STUN，不配置 TURN；在对称 NAT、防火墙或企业网络下可能失败。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。本测试版没有后台传输或断点续传；返回前台后会检查会话，失效时必须重新连接。</p>
 
         <h2>5. 浏览器与本地密钥</h2>
-        <p>正式支持桌面 Chrome 和 Edge；Android Chrome 为测试支持并应保持前台。Firefox、Safari 和其他浏览器不在当前支持范围内。临时密钥在页面关闭或超时后停止使用；主动保存的地址私钥只应进入本站来源的 IndexedDB，并可由用户忘记或通过清除站点数据删除。</p>
+        <p>正式支持桌面 Chrome 和 Edge；Android Chrome 132+ 与 iOS Safari 17+ 为测试支持并应保持前台。iOS Chrome、Android Edge、Samsung Internet、Firefox、桌面 Safari 和其他浏览器不属于本版正式目标；若核心能力完整，应用可能提供明确标记的受限模式，但不作兼容性承诺。临时密钥在页面关闭或超时后停止使用；主动保存的地址私钥只应进入本站来源的 IndexedDB，并可由用户忘记或通过清除站点数据删除。存储不可用时应用必须退回临时地址。</p>
+        <p>Android 文件接收写入用户选择的位置。iOS 文件接收先写入本站来源的 OPFS 临时项，并要求在开始前估算足够的文件空间与安全余量；无法估算、空间不足或私密浏览禁用 OPFS 时，不接收文件。OPFS 临时存储不是云端备份，导出成功、用户取消分享或传输失败后应删除；其他系统分享错误会保留可供本地下载或手动删除的副本。仍应避免把重要文件的唯一副本交给浏览器存储。</p>
 
         <h2>6. 报告安全问题</h2>
         <p>请把可复现步骤、受影响版本、预期与实际结果、影响评估和最小化的证明发送至 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。不要发送真实私钥、完整邀请、第三方个人数据、非法内容或可直接利用生产用户的攻击代码。请先给予合理修复时间再公开披露。</p>
@@ -93,7 +94,7 @@
           <li>Text, files, voice notes, and call signaling use WireGuard end-to-end encryption between Tailcat endpoints;</li>
           <li>Live audio, video, and display media is encrypted by browser WebRTC with DTLS-SRTP;</li>
           <li>The site is static and has no account, message database, file hosting, chat history, offline queue, or content recovery; and</li>
-          <li>A received file must be approved by the recipient and should not be downloaded, opened, or previewed automatically; a complete transfer should verify declared size and SHA-256.</li>
+          <li>A received file must be approved by the recipient and should not be opened or previewed automatically; a complete transfer should verify declared size and SHA-256. On iOS, a verified OPFS temporary file still requires another user action to export.</li>
         </ul>
 
         <h2>2. What is not protected</h2>
@@ -110,7 +111,7 @@
         <ol>
           <li>Send a complete invitation only through a verified, trusted channel, and confirm your intended peer out of band;</li>
           <li>Do not post room addresses publicly or reuse a persistent address with strangers or for long-lived sensitive work;</li>
-          <li>Keep the browser and operating system current, and use a supported Chrome or Edge browser;</li>
+          <li>Keep the browser and operating system current, and use supported desktop Chrome/Edge, Android Chrome 132+, or iOS Safari 17+;</li>
           <li>Before saving a file, confirm its sender, name, size, and purpose, then inspect it with local security software;</li>
           <li>Close the room after use. If you saved an address, use “forget address” and clear site data when appropriate;</li>
           <li>Before screen sharing, close notifications and sensitive windows, and verify the browser's sharing indicator is gone afterward; and</li>
@@ -118,10 +119,11 @@
         </ol>
 
         <h2>4. Network and availability</h2>
-        <p>Browser Tailcat traffic currently uses public DERP relays, which are rate-limited, best-effort, and have no uptime or throughput SLA. Live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent a call. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer.</p>
+        <p>Browser Tailcat traffic currently uses public DERP relays, which are rate-limited, best-effort, and have no uptime or throughput SLA. Live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent a call. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer. This beta has no background transfer or resume; it checks the session on return and requires reconnection after loss.</p>
 
         <h2>5. Browsers and local keys</h2>
-        <p>Desktop Chrome and Edge are supported; Android Chrome is beta and should remain in the foreground. Firefox, Safari, and other browsers are outside current support. Ephemeral keys stop being used when the page closes or times out. A deliberately remembered address key should exist only in this origin's IndexedDB and can be removed with “forget address” or by clearing site data.</p>
+        <p>Desktop Chrome and Edge are supported; Android Chrome 132+ and iOS Safari 17+ are foreground-only beta targets. iOS Chrome, Android Edge, Samsung Internet, Firefox, desktop Safari, and other browsers are not release targets. When their core capabilities are complete, the app may offer an explicitly limited mode without a compatibility commitment. Ephemeral keys stop being used when the page closes or times out. A deliberately remembered address key should exist only in this origin's IndexedDB and can be removed with “forget address” or by clearing site data; when storage is unavailable, the app must fall back to an ephemeral address.</p>
+        <p>Android file receive writes to a destination the user selects. iOS file receive first writes to an origin-private OPFS temporary entry and requires an estimated file-size allowance plus a safety margin before accepting bytes. It refuses receive when estimation fails, space is insufficient, or private browsing disables OPFS. OPFS is not a cloud backup; the temporary entry should be removed after export, user-cancelled sharing, or transfer failure. Other system-share errors retain a copy for local download or manual deletion, and important data must retain an independent original.</p>
 
         <h2>6. Reporting a security issue</h2>
         <p>Send reproducible steps, affected version, expected and actual behavior, impact assessment, and a minimal proof to <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>. Do not send real private keys, complete invitations, third-party personal data, illegal content, or exploit code that directly endangers production users. Allow reasonable time for a fix before public disclosure.</p>

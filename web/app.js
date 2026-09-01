@@ -1,5 +1,19 @@
 import { APP_CONFIG, defaultRegionCode, regionByCode } from "./config.js";
+import {
+  FILE_SINK_KIND,
+  FILE_SINK_REASON,
+  createFileSink,
+  getReceiveCapacity,
+  initializeFileSinks,
+  probeFileSinkSupport,
+} from "./file-sinks.js";
 import { createI18n } from "./i18n.js";
+import {
+  createScreenWakeLockManager,
+  inspectMobileRuntime,
+  subscribePageLifecycle,
+  syncVisualViewportCSSVariables,
+} from "./mobile-runtime.js";
 import { encode as encodeQR } from "./vendor/uqr.js";
 
 const $ = (id) => document.getElementById(id);
@@ -29,6 +43,13 @@ const HEARTBEAT_FAILURE_LIMIT = 2;
 const HEARTBEAT_RESPONSE_TIMEOUT_MS = 20 * 1000;
 const MAX_PENDING_FILES = 100;
 const MAX_TRANSFER_HISTORY_ITEMS = 100;
+const DB_PROBE_KEY = `${DB_KEY}-probe`;
+const VOICE_MIME_CANDIDATES = Object.freeze([
+  "audio/webm;codecs=opus",
+  "audio/mp4;codecs=mp4a.40.2",
+  "audio/mp4",
+  "audio/webm",
+]);
 
 // Read the invite before any transport starts, then immediately remove it from
 // the visible URL. Fragments never travel in HTTP requests, Referer headers, or
@@ -68,20 +89,38 @@ function inviteURL(address) {
 }
 
 function browserSupport() {
-  const ua = navigator.userAgent;
-  const brands = navigator.userAgentData?.brands?.map(({ brand }) => brand.toLowerCase()) || [];
-  const android = /Android/i.test(ua) || navigator.userAgentData?.platform === "Android";
-  const safari = /Safari\//.test(ua) && !/(Chrome|Chromium|CriOS|Edg|OPR)\//.test(ua);
-  const firefox = /(Firefox|FxiOS)\//.test(ua);
-  const edge = brands.some((brand) => brand.includes("microsoft edge")) || /Edg\//.test(ua);
-  const chrome = brands.some((brand) => brand.includes("google chrome"))
-    || (/Chrome\//.test(ua) && !/(OPR|SamsungBrowser|EdgA|EdgiOS)\//.test(ua));
-  const ios = /(iPhone|iPad|iPod)/i.test(ua);
+  const runtime = inspectMobileRuntime();
+  const { platform } = runtime;
+  const ua = navigator.userAgent || "";
+  const android = platform.os === "android";
+  const ios = platform.os === "ios";
+  const safari = platform.browser === "safari";
+  const firefox = platform.browser === "firefox";
+  const edge = platform.browser === "edge";
+  const chrome = platform.browser === "chrome";
+  const androidChromeVersion = Number(/Chrome\/(\d+)/u.exec(ua)?.[1] || 0);
+  const iosSafariVersion = Number(/Version\/(\d+)/u.exec(ua)?.[1] || 0);
+  const minimumVersionMet = platform.channel === "android-chrome"
+    ? androidChromeVersion >= 132
+    : platform.channel === "ios-safari"
+      ? iosSafariVersion >= 17
+      : true;
+  const compactTouchLayout = window.matchMedia?.("(max-width: 1024px) and (pointer: coarse)").matches === true;
+  const channelEnabled = (!android || APP_CONFIG.mobile.androidEnabled)
+    && (!ios || APP_CONFIG.mobile.iosEnabled);
   return {
+    runtime,
+    platform,
     android,
     edge,
     chrome,
-    ok: !ios && !safari && !firefox && ((android && chrome && !edge) || (!android && (chrome || edge))),
+    ios,
+    safari,
+    firefox,
+    mobile: platform.isMobile || compactTouchLayout,
+    minimumVersionMet,
+    limited: !platform.officiallySupported || !minimumVersionMet,
+    ok: runtime.coreReady && channelEnabled,
   };
 }
 
@@ -91,6 +130,12 @@ const tcTest = {
   ready: false,
   inviteConsumed: hadInviteFragment && location.hash === "",
   unsupported: !support.ok,
+  runtime: {
+    coreReady: support.runtime.coreReady,
+    missing: [...support.runtime.capabilities.missing],
+    channel: support.platform.channel,
+    officiallySupported: support.platform.officiallySupported && support.minimumVersionMet,
+  },
   listenAddr: null,
   recvBytes: 0,
   recvSha256: null,
@@ -113,6 +158,20 @@ const tcTest = {
   }),
 };
 Object.defineProperty(window, "tcTest", { value: tcTest, enumerable: false, configurable: false });
+
+let persistenceAvailable = typeof globalThis.indexedDB !== "undefined";
+let fileSinkSupport = Object.freeze({
+  preferredKind: null,
+  maxBytes: 0,
+  picker: Object.freeze({ supported: false, maxBytes: 0 }),
+  opfs: Object.freeze({ supported: false, receivable: false, maxBytes: 0, reason: FILE_SINK_REASON.NO_SINK }),
+});
+let pageWasBackgrounded = false;
+let resumeCheckInFlight = null;
+const transferItemCleanups = new WeakMap();
+const stagedTransferItems = new Set();
+const wakeLocks = createScreenWakeLockManager({ onError: recordError });
+const visualViewportSync = syncVisualViewportCSSVariables();
 
 function redact(value) {
   return String(value || "")
@@ -181,6 +240,40 @@ function safeMime(input, prefix = "") {
   return value;
 }
 
+function safeVoiceMime(input) {
+  const value = String(input || "").trim().toLowerCase();
+  if (VOICE_MIME_CANDIDATES.includes(value)) return value;
+  const parameterized = /^(audio\/(?:webm|mp4))[ \t]*;[ \t]*codecs[ \t]*=[ \t]*(?:"(opus|mp4a\.40\.2)"|(opus|mp4a\.40\.2))[ \t]*$/u.exec(value);
+  if (!parameterized) return "";
+  const [, container, quotedCodec, bareCodec] = parameterized;
+  const codec = quotedCodec || bareCodec;
+  if (container === "audio/webm" && codec === "opus") return "audio/webm;codecs=opus";
+  if (container === "audio/mp4" && codec === "mp4a.40.2") return "audio/mp4;codecs=mp4a.40.2";
+  return "";
+}
+
+function recordableVoiceTypes() {
+  if (!window.MediaRecorder) return [];
+  if (typeof MediaRecorder.isTypeSupported !== "function") return ["audio/webm"];
+  return VOICE_MIME_CANDIDATES.filter((type) => MediaRecorder.isTypeSupported(type));
+}
+
+function playableVoiceTypes() {
+  const audio = document.createElement("audio");
+  return VOICE_MIME_CANDIDATES.filter((type) => audio.canPlayType(type) !== "");
+}
+
+function selectMutualVoiceType(localTypes, remoteTypes) {
+  const local = Array.isArray(localTypes) ? localTypes.map(safeVoiceMime).filter(Boolean) : [];
+  if (!Array.isArray(remoteTypes)) return local[0] || "";
+  const remote = new Set(remoteTypes.map(safeVoiceMime).filter(Boolean));
+  return local.find((type) => remote.has(type)) || "";
+}
+
+function selectedVoiceRecordType() {
+  return selectMutualVoiceType(recordableVoiceTypes(), peerCapabilities?.voice?.playTypes);
+}
+
 function validFileSize(size) {
   return Number.isSafeInteger(size) && size >= 0 && size <= APP_CONFIG.limits.fileBytes;
 }
@@ -190,17 +283,78 @@ function setStatus(message, state = "loading") {
   $("status-dot").className = `status-dot ${state}`;
 }
 
+function setMobileSheet(open) {
+  const hasRoomControls = Boolean(activeSession || stagedTransferItems.size);
+  const expanded = Boolean(open && support.mobile && hasRoomControls);
+  $("app").dataset.mobileSheet = expanded ? "open" : "closed";
+  $("mobile-menu-btn")?.setAttribute("aria-expanded", String(expanded));
+  $("mobile-controls-sheet")?.setAttribute("aria-hidden", String(support.mobile && hasRoomControls && !expanded));
+}
+
+function setMobileState(state) {
+  if (!["landing", "waiting", "connecting", "connected", "call"].includes(state)) return;
+  $("app").dataset.mobileState = state;
+  if (state !== "connected") setMobileSheet(false);
+}
+
+function restingMobileState() {
+  if (stagedTransferItems.size) return "connected";
+  return listener ? "waiting" : "landing";
+}
+
+function setPersistenceAvailable(available) {
+  persistenceAvailable = Boolean(available);
+  const checkbox = $("persist-key");
+  checkbox.disabled = !persistenceAvailable || tcTest.state.room !== "closed";
+  if (!persistenceAvailable) checkbox.checked = false;
+  checkbox.closest(".check-row")?.classList.toggle("hidden", !persistenceAvailable);
+  $("persist-risk").classList.toggle("hidden", !persistenceAvailable || !checkbox.checked);
+  if (!persistenceAvailable) $("forget-key").classList.add("hidden");
+  $("persistent-unavailable").classList.toggle("hidden", persistenceAvailable);
+}
+
+function renderRuntimeCapabilityNote() {
+  const notes = [];
+  if (support.limited) notes.push(t("capability_limited"));
+  if (!fileSinkSupport.preferredKind) notes.push(t("file_receive_unavailable"));
+  const note = $("capability-note");
+  note.textContent = notes.join(" ");
+  note.classList.toggle("hidden", notes.length === 0);
+}
+
+async function refreshFileSinkSupport() {
+  try {
+    await initializeFileSinks();
+    fileSinkSupport = await probeFileSinkSupport({ hardMaxBytes: APP_CONFIG.limits.fileBytes });
+  } catch (error) {
+    recordError(error);
+  }
+  tcTest.runtime.fileSink = {
+    kind: fileSinkSupport.preferredKind,
+    maxBytes: fileSinkSupport.maxBytes,
+    picker: fileSinkSupport.picker.supported,
+    opfs: fileSinkSupport.opfs.receivable,
+  };
+  renderRuntimeCapabilityNote();
+  return fileSinkSupport;
+}
+
 function setMediaStatus(message) {
   $("media-status").textContent = message;
 }
 
 function setComposerEnabled(enabled) {
-  for (const id of ["send-text", "send-text-btn", "voice-call-btn", "video-call-btn"]) {
+  for (const id of ["send-text", "send-text-btn"]) {
     $(id).disabled = !enabled;
   }
+  const capabilities = localCapabilities();
+  $("voice-call-btn").disabled = !enabled || !capabilities.rtc.voice || peerCapabilities?.rtc?.voice !== true;
+  $("video-call-btn").disabled = !enabled || !capabilities.rtc.video || peerCapabilities?.rtc?.video !== true;
   $("attach-btn").disabled = !enabled || !peerCanReceiveFiles();
-  $("ptt-btn").disabled = !enabled || peerCapabilities?.voice?.enabled !== true;
-  const screenEnabled = enabled && !support.android && Boolean(navigator.mediaDevices?.getDisplayMedia);
+  $("ptt-btn").disabled = !enabled || !capabilities.voice.enabled || peerCapabilities?.voice?.enabled !== true;
+  const screenEnabled = enabled
+    && capabilities.rtc.screen
+    && (peerCapabilities?.rtc?.screenReceive === true || peerCapabilities?.rtc?.video === true);
   $("screen-share-btn").disabled = !screenEnabled;
 }
 
@@ -221,6 +375,12 @@ function applyLanguage(language) {
   $("blocked-language-select").value = i18n.language;
   rebuildRegions();
   renderConnectionState();
+  renderRuntimeCapabilityNote();
+  if (support.mobile) {
+    $("ptt-btn").title = t("voice_tap_start");
+    $("ptt-btn").setAttribute("aria-label", t("voice_tap_start"));
+  }
+  updateMediaControls();
 }
 
 i18n.apply();
@@ -230,12 +390,24 @@ $("language-select").addEventListener("change", (event) => applyLanguage(event.t
 $("blocked-language-select").addEventListener("change", (event) => applyLanguage(event.target.value));
 rebuildRegions();
 $("region-select").value = defaultRegionCode();
-$("android-note").classList.toggle("hidden", !support.android);
-$("screen-share-btn").classList.toggle("hidden", support.android || !navigator.mediaDevices?.getDisplayMedia);
+$("android-note").classList.toggle("hidden", support.platform.channel !== "android-chrome");
+$("ios-note").classList.toggle("hidden", support.platform.channel !== "ios-safari");
+$("screen-share-btn").classList.toggle("hidden", support.mobile || !navigator.mediaDevices?.getDisplayMedia);
+if (support.mobile) {
+  $("ptt-btn").title = t("voice_tap_start");
+  $("ptt-btn").setAttribute("aria-label", t("voice_tap_start"));
+}
+renderRuntimeCapabilityNote();
 
 if (!support.ok) {
   $("app").classList.add("hidden");
   $("browser-blocker").classList.remove("hidden");
+  $("blocked-invite-copy").classList.toggle("hidden", !pendingInviteAddress);
+  $("copy-blocked-invite").addEventListener("click", () => {
+    if (pendingInviteAddress) {
+      void copyWithFeedback($("copy-blocked-invite"), inviteURL(pendingInviteAddress), "copy_preserved_invite");
+    }
+  });
   tcTest.state.transport = "unsupported";
 } else {
   bootstrap().catch((error) => {
@@ -248,6 +420,7 @@ if (!support.ok) {
 // ---- IndexedDB key persistence -----------------------------------------
 
 function openSettingsDB() {
+  if (typeof globalThis.indexedDB === "undefined") return Promise.reject(new Error("IndexedDB unavailable"));
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
     request.onupgradeneeded = () => {
@@ -297,6 +470,35 @@ async function dbDelete() {
     });
   } finally {
     db.close();
+  }
+}
+
+async function probePersistence() {
+  if (!persistenceAvailable) {
+    setPersistenceAvailable(false);
+    return false;
+  }
+  try {
+    const db = await openSettingsDB();
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(DB_STORE, "readwrite");
+        const store = transaction.objectStore(DB_STORE);
+        store.put({ checkedAt: Date.now() }, DB_PROBE_KEY);
+        store.delete(DB_PROBE_KEY);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error("IndexedDB probe aborted"));
+      });
+    } finally {
+      db.close();
+    }
+    setPersistenceAvailable(true);
+    return true;
+  } catch (error) {
+    recordError(error);
+    setPersistenceAvailable(false);
+    return false;
   }
 }
 
@@ -498,24 +700,34 @@ async function sendHandshakeReply(address, meta) {
 }
 
 function localCapabilities() {
+  const voiceRecordTypes = recordableVoiceTypes();
+  const voicePlayTypes = playableVoiceTypes();
   return {
     text: { maxBytes: APP_CONFIG.limits.textBytes },
     file: {
       protocol: "TCF1",
-      maxBytes: APP_CONFIG.limits.fileBytes,
+      maxBytes: fileSinkSupport.maxBytes,
       chunkBytes: APP_CONFIG.limits.fileChunkBytes,
-      receive: typeof window.showSaveFilePicker === "function",
+      receive: Boolean(fileSinkSupport.preferredKind && fileSinkSupport.maxBytes >= 0),
+      sink: fileSinkSupport.preferredKind,
     },
     voice: {
       maxBytes: APP_CONFIG.limits.voiceBytes,
       maxSeconds: APP_CONFIG.limits.voiceSeconds,
-      enabled: Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia),
+      enabled: Boolean(
+        window.MediaRecorder
+        && navigator.mediaDevices?.getUserMedia
+        && voiceRecordTypes.length
+        && voicePlayTypes.length,
+      ),
+      recordTypes: voiceRecordTypes,
+      playTypes: voicePlayTypes,
     },
     rtc: {
       voice: Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia),
       video: Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia),
-      screen: !support.android && Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getDisplayMedia),
-      screenShare: !support.android && Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getDisplayMedia),
+      screen: !support.mobile && Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getDisplayMedia),
+      screenShare: !support.mobile && Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getDisplayMedia),
       screenReceive: Boolean(window.RTCPeerConnection),
       turn: false,
     },
@@ -544,14 +756,23 @@ function renderConnectionState() {
     $("peer-label").textContent = t("connected_peer");
     setStatus(t("status_connected"), "connected");
     setComposerEnabled(true);
+    setMobileState(peerConnection || pendingCallOffer || currentCallId ? "call" : "connected");
     tcTest.state.peer = "connected";
     return;
   }
   $("peer-label").textContent = t("waiting_peer");
   setComposerEnabled(false);
   tcTest.state.peer = "none";
-  if (listener) setStatus(format("status_listening", { region: listener.regionName || listener.regionCode || t("region_auto") }), "ready");
-  else if (tcTest.ready) setStatus(stoppedForIdle ? t("status_idle_closed") : t("status_ready"), "ready");
+  if (handshakeWaiter || pendingHandshakeNonce || pendingInboundHandshake) {
+    setMobileState("connecting");
+    setStatus(t("status_connecting"), "loading");
+  } else if (listener) {
+    setMobileState(restingMobileState());
+    setStatus(format("status_listening", { region: listener.regionName || listener.regionCode || t("region_auto") }), "ready");
+  } else if (tcTest.ready) {
+    setMobileState(restingMobileState());
+    setStatus(stoppedForIdle ? t("status_idle_closed") : t("status_ready"), "ready");
+  }
 }
 
 function stopPeerHeartbeat() {
@@ -614,7 +835,62 @@ function startPeerHeartbeat() {
   heartbeatTimer = setInterval(() => runPeerHeartbeat(generation), HEARTBEAT_INTERVAL_MS);
 }
 
+async function verifySessionAfterResume() {
+  if (resumeCheckInFlight || !activeSession || !activePeerAddress) return resumeCheckInFlight;
+  const session = activeSession;
+  const address = activePeerAddress;
+  const pingId = randomID();
+  resumeCheckInFlight = (async () => {
+    try {
+      const response = await sendChatEnvelopeTo(
+        address,
+        { type: "SESSION_PING", v: APP_CONFIG.protocolVersion, session, pingId },
+        new Uint8Array(),
+        APP_CONFIG.ports.control,
+        HEARTBEAT_RESPONSE_TIMEOUT_MS,
+      );
+      const pong = unpackChatEnvelope(response);
+      if (pong.payload.length
+        || pong.meta.type !== "SESSION_PONG"
+        || !sessionMatches(pong.meta, session)
+        || pong.meta.pingId !== pingId) throw new Error("resume heartbeat rejected");
+      if (session === activeSession && address === activePeerAddress) {
+        noteAuthenticatedPeerTraffic();
+        setStatus(t("background_reconnected"), "connected");
+      }
+      return true;
+    } catch (error) {
+      if (session === activeSession && address === activePeerAddress) {
+        releaseLostPeer();
+        setStatus(t("session_lost"), "error");
+      }
+      recordError(error);
+      return false;
+    } finally {
+      $("background-risk").classList.add("hidden");
+      resumeCheckInFlight = null;
+    }
+  })();
+  return resumeCheckInFlight;
+}
+
+function notePageBackgrounded() {
+  pageWasBackgrounded = true;
+  if (support.mobile && (activeSession || activeFileTransfer || recorder || peerConnection || handshakeWaiter)) {
+    $("background-risk").classList.remove("hidden");
+  }
+}
+
+function resumeForegroundSession() {
+  if (!pageWasBackgrounded) return;
+  pageWasBackgrounded = false;
+  void wakeLocks.request();
+  if (activeSession) void verifySessionAfterResume();
+  else $("background-risk").classList.add("hidden");
+}
+
 function clearPeer() {
+  cancelActiveVoiceRecording();
   stopPeerHeartbeat();
   lastAuthenticatedPeerTrafficAt = 0;
   activePeerAddress = "";
@@ -631,6 +907,7 @@ function clearPeer() {
 }
 
 async function loadRememberedKey() {
+  if (!persistenceAvailable) return null;
   try {
     const saved = await dbRead();
     if (!saved?.privateKeyJSON) return null;
@@ -642,6 +919,7 @@ async function loadRememberedKey() {
     return saved;
   } catch (error) {
     recordError(error);
+    setPersistenceAvailable(false);
     return null;
   }
 }
@@ -656,12 +934,23 @@ async function startRoom() {
   $("region-select").disabled = true;
   $("persist-key").disabled = true;
   setStatus(t("status_starting"), "loading");
+  setMobileState("connecting");
   tcTest.state.room = "starting";
   listenerStarting = (async () => {
     let created = null;
     try {
-      const remember = $("persist-key").checked;
-      const saved = remember ? await dbRead().catch(() => null) : null;
+      await refreshFileSinkSupport();
+      let remember = persistenceAvailable && $("persist-key").checked;
+      let saved = null;
+      if (remember) {
+        try {
+          saved = await dbRead();
+        } catch (error) {
+          recordError(error);
+          setPersistenceAvailable(false);
+          remember = false;
+        }
+      }
       const requestedRegion = regionByCode($("region-select").value);
       created = await tailcatListen({
         derpMapURL: APP_CONFIG.derpMapURL,
@@ -679,14 +968,20 @@ async function startRoom() {
       $("stop-listen-btn").classList.remove("hidden");
       $("region-select").value = regionByCode(created.regionCode || requestedRegion.code).code;
       if (remember) {
-        await dbWrite({
-          privateKeyJSON: created.privateKeyJSON,
-          regionID: created.regionID,
-          regionCode: created.regionCode || requestedRegion.code,
-          savedAt: new Date().toISOString(),
-        });
-        $("forget-key").classList.remove("hidden");
-        $("send-progress").textContent = t("persistent_saved");
+        try {
+          await dbWrite({
+            privateKeyJSON: created.privateKeyJSON,
+            regionID: created.regionID,
+            regionCode: created.regionCode || requestedRegion.code,
+            savedAt: new Date().toISOString(),
+          });
+          $("forget-key").classList.remove("hidden");
+          $("send-progress").textContent = t("persistent_saved");
+        } catch (error) {
+          recordError(error);
+          setPersistenceAvailable(false);
+          $("send-progress").textContent = t("persistent_unavailable");
+        }
       }
       markActivity();
       renderConnectionState();
@@ -703,7 +998,8 @@ async function startRoom() {
       $("stop-listen-btn").classList.add("hidden");
       $("listen-btn").disabled = false;
       $("region-select").disabled = false;
-      $("persist-key").disabled = false;
+      $("persist-key").disabled = !persistenceAvailable;
+      setMobileState(restingMobileState());
       setStatus(format("status_failed", { message: redact(error.message) }), "error");
       recordError(error);
       throw error;
@@ -736,8 +1032,9 @@ async function stopRoom({ idle = false } = {}) {
   $("listen-btn").disabled = !tcTest.ready;
   $("stop-listen-btn").classList.add("hidden");
   $("region-select").disabled = false;
-  $("persist-key").disabled = false;
+  $("persist-key").disabled = !persistenceAvailable;
   clearPeer();
+  setMobileState(restingMobileState());
   setStatus(idle ? t("status_idle_closed") : t("status_stopped"), idle ? "error" : "ready");
 }
 
@@ -843,16 +1140,26 @@ async function connectToPeer(address) {
     setStatus(t("status_busy"), "error");
     return false;
   }
-  if (handshakeWaiter) {
+  if (handshakeWaiter || pendingHandshakeNonce) {
     setStatus(t("status_connecting"), "loading");
     return false;
   }
-  await startRoom();
   pendingPeerAddress = normalized;
   pendingHandshakeNonce = randomID();
   $("send-addr").value = normalized;
   $("connect-btn").disabled = true;
+  setMobileState("connecting");
   setStatus(t("status_connecting"), "loading");
+  await wakeLocks.acquire("handshake");
+  try {
+    await startRoom();
+  } catch (_) {
+    pendingPeerAddress = "";
+    pendingHandshakeNonce = "";
+    $("connect-btn").disabled = !tcTest.ready;
+    await wakeLocks.release("handshake");
+    return false;
+  }
   const wait = waitForHandshake(normalized, pendingHandshakeNonce);
   try {
     const nonce = pendingHandshakeNonce;
@@ -882,7 +1189,9 @@ async function connectToPeer(address) {
     recordError(error);
     return false;
   } finally {
+    await wakeLocks.release("handshake");
     $("connect-btn").disabled = !tcTest.ready;
+    if (!activeSession) setMobileState(restingMobileState());
   }
 }
 
@@ -921,7 +1230,12 @@ async function receiveControl(connection) {
     const { meta, payload } = unpackChatEnvelope(bytes);
     if (payload.length) throw new Error("control message cannot have a payload");
     if (meta.type === "HELLO") {
-      await receiveHello(meta);
+      await wakeLocks.acquire("handshake");
+      try {
+        await receiveHello(meta);
+      } finally {
+        await wakeLocks.release("handshake");
+      }
       return;
     }
     if (meta.type === "HELLO_ACK") {
@@ -956,6 +1270,8 @@ async function receiveControl(connection) {
       noteAuthenticatedPeerTraffic();
       if (meta.type === "RTC_OFFER") await showIncomingCall(meta);
       else if (meta.type === "RTC_ANSWER" && peerConnection && meta.callId === currentCallId) await acceptRTCAnswer(meta);
+      else if (meta.type === "RTC_RESTART_OFFER" && peerConnection && meta.callId === currentCallId) await acceptRTCRestartOffer(meta);
+      else if (meta.type === "RTC_RESTART_ANSWER" && peerConnection && meta.callId === currentCallId) await acceptRTCRestartAnswer(meta);
       else if (meta.type === "RTC_DECLINE" && meta.callId === currentCallId) endLiveLink(false, t("call_declined"));
       else if (meta.type === "RTC_HANGUP"
         && (meta.callId === currentCallId || meta.callId === pendingCallOffer?.callId)) {
@@ -1259,11 +1575,14 @@ function addMessage(item) {
   article.scrollIntoView({ block: "end" });
 }
 
-addEventListener("pagehide", () => {
+addEventListener("pagehide", (event) => {
+  if (event.persisted) return;
   for (const message of renderedMessages) {
-    if (message.objectURL) URL.revokeObjectURL(message.objectURL);
+    if (!message.objectURL) continue;
+    URL.revokeObjectURL(message.objectURL);
+    message.objectURL = "";
   }
-}, { once: true });
+});
 
 // ---- TCF1 streaming file protocol --------------------------------------
 
@@ -1276,10 +1595,34 @@ function peerCanReceiveFiles() {
   return peerCapabilities?.file?.protocol === "TCF1" && peerCapabilities.file.receive === true;
 }
 
+function peerMaximumFileBytes() {
+  const advertised = Number(peerCapabilities?.file?.maxBytes);
+  if (!Number.isSafeInteger(advertised) || advertised < 0) return APP_CONFIG.limits.fileBytes;
+  return Math.min(APP_CONFIG.limits.fileBytes, advertised);
+}
+
 function renderTransferCount() {
   const count = $("transfer-list").children.length;
   $("queue-count").textContent = String(count);
   $("transfer-tray").classList.toggle("hidden", count === 0);
+}
+
+function pruneFinishedTransferItems() {
+  let removableCount = finishedTransferItems.reduce(
+    (count, item) => count + (stagedTransferItems.has(item) ? 0 : 1),
+    0,
+  );
+  while (removableCount > MAX_TRANSFER_HISTORY_ITEMS) {
+    const index = finishedTransferItems.findIndex((item) => !stagedTransferItems.has(item));
+    if (index < 0) break;
+    const [removed] = finishedTransferItems.splice(index, 1);
+    const cleanup = transferItemCleanups.get(removed);
+    if (cleanup) void cleanup().catch(recordError);
+    transferItemCleanups.delete(removed);
+    removed?.remove();
+    removableCount -= 1;
+    if (!activeSession) setMobileState(restingMobileState());
+  }
 }
 
 function finishTransferItem(ui) {
@@ -1291,9 +1634,10 @@ function finishTransferItem(ui) {
     control.disabled = true;
   }
   finishedTransferItems.push(ui.item);
-  while (finishedTransferItems.length > MAX_TRANSFER_HISTORY_ITEMS) {
-    finishedTransferItems.shift()?.remove();
-  }
+  // A verified OPFS file is still user data, not disposable UI history. Keep
+  // every staged entry until the user exports or deletes its local copy, and
+  // apply the history limit only to entries with no retained file.
+  pruneFinishedTransferItems();
   renderTransferCount();
 }
 
@@ -1333,6 +1677,11 @@ function enqueueFiles(files) {
     const name = sanitizeFileName(file.name);
     if (!validFileSize(file.size)) {
       setStatus(format("file_too_large", { name }), "error");
+      continue;
+    }
+    const peerLimit = peerMaximumFileBytes();
+    if (file.size > peerLimit) {
+      setStatus(format("file_peer_limit", { name, limit: humanSize(peerLimit) }), "error");
       continue;
     }
     const ui = createOutgoingTransferItem(file);
@@ -1396,27 +1745,30 @@ async function processFileQueue() {
 async function sendFileTransfer(entry) {
   if (!activeSession || !activePeerAddress) throw new Error(t("need_peer"));
   if (!peerCanReceiveFiles()) throw new Error(t("unsupported_capability"));
+  if (entry.file.size > peerMaximumFileBytes()) {
+    throw new Error(format("file_peer_limit", { name: entry.name, limit: humanSize(peerMaximumFileBytes()) }));
+  }
   const transferId = randomID();
   const session = activeSession;
   const address = activePeerAddress;
-  const connection = await tailcatDial({
-    addr: address,
-    derpMapURL: APP_CONFIG.derpMapURL,
-    port: APP_CONFIG.ports.file,
-  });
-  entry.connection = connection;
-  if (entry.cancelled) {
-    connection.close();
-    throw new Error(t("file_cancelled"));
-  }
-  const reader = new ConnectionReader(connection, FILE_DECISION_TIMEOUT_MS + 10_000);
-  const hasher = tailcatNewSHA256();
+  let connection = null;
+  let hasher = null;
   let sent = 0;
   let digest = "";
   tcTest.sendDone = false;
   tcTest.sentBytes = 0;
   tcTest.sentSha256 = null;
+  await wakeLocks.acquire("file-transfer");
   try {
+    connection = await tailcatDial({
+      addr: address,
+      derpMapURL: APP_CONFIG.derpMapURL,
+      port: APP_CONFIG.ports.file,
+    });
+    entry.connection = connection;
+    if (entry.cancelled) throw new Error(t("file_cancelled"));
+    const reader = new ConnectionReader(connection, FILE_DECISION_TIMEOUT_MS + 10_000);
+    hasher = tailcatNewSHA256();
     const offer = {
       type: "OFFER",
       v: APP_CONFIG.protocolVersion,
@@ -1436,7 +1788,12 @@ async function sendFileTransfer(entry) {
       throw new Error("file response session rejected");
     }
     if (response.type !== "ACCEPT") {
-      if (response.type === "REJECT") throw new Error(t("file_rejected"));
+      if (response.type === "REJECT") {
+        if (response.reason === FILE_SINK_REASON.INSUFFICIENT_SPACE
+          || response.reason === FILE_SINK_REASON.NO_STORAGE_ESTIMATE) throw new Error(t("file_space_insufficient"));
+        if (response.reason === FILE_SINK_REASON.NO_SINK) throw new Error(t("file_receive_unavailable"));
+        throw new Error(t("file_rejected"));
+      }
       throw new Error(response.reason || t("file_cancelled"));
     }
     noteAuthenticatedPeerTraffic();
@@ -1489,19 +1846,23 @@ async function sendFileTransfer(entry) {
     addMessage({ type: "file", mine: true, name: entry.name, size: entry.file.size, status: t("file_sent") });
     setStatus(t("file_sent"), "connected");
   } finally {
-    hasher.close();
-    connection.close();
+    hasher?.close();
+    connection?.close();
+    await wakeLocks.release("file-transfer");
   }
 }
 
 async function receiveFile(connection) {
-  let writable = null;
+  let sink = null;
   let hasher = null;
   let ui = null;
   let accepted = false;
-  let verified = false;
+  let completed = false;
+  let localArtifactReady = false;
+  let terminalWriteStarted = false;
   let offer = null;
   const reader = new ConnectionReader(connection);
+  await wakeLocks.acquire("file-transfer");
   try {
     const magic = await reader.readExact(4);
     if (!equalBytes(magic, TCF_MAGIC)) throw new Error("invalid TCF1 preamble");
@@ -1510,7 +1871,7 @@ async function receiveFile(connection) {
       || offer.v !== APP_CONFIG.protocolVersion
       || !hasSession(offer)
       || typeof offer.transferId !== "string"
-      || offer.transferId.length !== 32
+      || !/^[0-9a-f]{32}$/u.test(offer.transferId)
       || !validFileSize(offer.size)
       || offer.chunkBytes !== APP_CONFIG.limits.fileChunkBytes) throw new Error("file offer rejected");
     offer.name = sanitizeFileName(offer.name);
@@ -1524,21 +1885,32 @@ async function receiveFile(connection) {
       }));
       return;
     }
-    if (typeof window.showSaveFilePicker !== "function") {
+    activeFileTransfer = { direction: "incoming", connection, transferId: offer.transferId, cancelled: false, sink: null };
+    await refreshFileSinkSupport();
+    const sinkKind = fileSinkSupport.preferredKind;
+    const capacity = await getReceiveCapacity(offer.size, {
+      kind: sinkKind,
+      hardMaxBytes: APP_CONFIG.limits.fileBytes,
+    });
+    if (!capacity.ok) {
       await connection.write(packFileJSON(FILE_FRAME.META, {
         type: "REJECT", v: APP_CONFIG.protocolVersion, session: activeSession,
-        transferId: offer.transferId, reason: "NO_SAFE_FILE_PICKER",
+        transferId: offer.transferId, reason: capacity.reason || FILE_SINK_REASON.NO_SINK,
       }));
-      setStatus(t("file_no_picker"), "error");
+      const key = capacity.reason === FILE_SINK_REASON.INSUFFICIENT_SPACE
+        || capacity.reason === FILE_SINK_REASON.NO_STORAGE_ESTIMATE
+        ? "file_space_insufficient"
+        : "file_receive_unavailable";
+      setStatus(t(key), "error");
       return;
     }
 
-    activeFileTransfer = { direction: "incoming", connection, transferId: offer.transferId, cancelled: false };
     tcTest.state.file = "offered";
     ui = createIncomingTransferItem(offer);
-    const decision = await waitForIncomingFileDecision(ui, offer, connection);
+    const decision = await waitForIncomingFileDecision(ui, offer, connection, sinkKind);
     if (!decision.accepted) return;
-    writable = decision.writable;
+    sink = decision.sink;
+    activeFileTransfer.sink = sink;
     accepted = true;
     hasher = tailcatNewSHA256();
     tcTest.state.file = "receiving";
@@ -1567,7 +1939,7 @@ async function receiveFile(connection) {
           throw new Error("file chunk length violates TCF1");
         }
         if (activeFileTransfer?.cancelled) throw new Error(t("file_cancelled"));
-        await writable.write(frame.payload);
+        await sink.write(frame.payload);
         await hasher.update(frame.payload);
         received += frame.payload.length;
         tcTest.recvBytes = received;
@@ -1591,29 +1963,65 @@ async function receiveFile(connection) {
       const digest = await hasher.digestHex();
       if (digest !== final.sha256) throw new Error(t("file_hash_failed"));
       noteAuthenticatedPeerTraffic();
-      await writable.close();
-      writable = null;
-      verified = true;
-      tcTest.recvSha256 = digest;
-      tcTest.recvDone = true;
-      ui.progress.value = 1;
-      ui.detail.textContent = t("file_verified");
-      ui.cancel.classList.add("hidden");
-      await connection.write(packFileJSON(FILE_FRAME.FINAL, {
+      await sink.close();
+      let stagedExport = null;
+      if (sink.kind === FILE_SINK_KIND.OPFS_EXPORT) stagedExport = await sink.prepareExport();
+      localArtifactReady = true;
+      const doneFrame = packFileJSON(FILE_FRAME.FINAL, {
         type: "DONE", v: APP_CONFIG.protocolVersion, session: activeSession,
         transferId: offer.transferId, size: received, sha256: digest,
-      }));
-      await connection.closeWrite();
-      addMessage({ type: "file", mine: false, name: offer.name, size: offer.size, status: t("file_verified") });
-      setStatus(t("file_verified"), "connected");
+      });
+      terminalWriteStarted = true;
+      let confirmationError = null;
+      try {
+        await connection.write(doneFrame);
+        completed = true;
+      } catch (error) {
+        // A transport may report an error after the complete DONE frame was
+        // handed to its peer. Preserve the already verified local artifact,
+        // but do not claim that the sender received the confirmation.
+        confirmationError = error;
+        recordError(error);
+      }
+      if (completed) {
+        // The sender treats the DONE frame itself as terminal and does not wait
+        // for EOF, so a half-close failure must never roll back a saved file.
+        try {
+          await connection.closeWrite();
+        } catch (error) {
+          recordError(error);
+        }
+      }
+      tcTest.recvSha256 = digest;
+      tcTest.recvDone = completed;
+      ui.progress.value = 1;
+      ui.cancel.classList.add("hidden");
+      if (stagedExport) {
+        configureStagedFileUI(ui, sink, stagedExport);
+        const stagedStatus = confirmationError ? t("file_staged_confirmation_unknown") : t("file_staged");
+        ui.detail.textContent = stagedStatus;
+        ui.localNote.textContent = stagedStatus;
+        ui.localNote.classList.remove("hidden");
+      } else {
+        ui.detail.textContent = confirmationError ? t("file_saved_confirmation_unknown") : t("file_verified");
+      }
+      const status = confirmationError
+        ? t(stagedExport ? "file_staged_confirmation_unknown" : "file_saved_confirmation_unknown")
+        : t(stagedExport ? "file_staged" : "file_verified");
+      addMessage({ type: "file", mine: false, name: offer.name, size: offer.size, status });
+      setStatus(status, confirmationError ? "error" : "connected");
       break;
     }
   } catch (error) {
-    if (writable) {
-      try { await writable.abort(); } catch (_) {}
-      writable = null;
+    const preserveVerifiedSink = localArtifactReady && terminalWriteStarted;
+    if (sink && !completed && !preserveVerifiedSink) {
+      try {
+        if (sink.state === "closed") await sink.remove();
+        else await sink.abort();
+      } catch (_) {}
+      sink = null;
     }
-    if (accepted && offer && activeSession) {
+    if (accepted && offer && activeSession && !terminalWriteStarted) {
       try {
         await connection.write(packFileJSON(FILE_FRAME.CANCEL, {
           type: "ERROR", v: APP_CONFIG.protocolVersion, session: activeSession,
@@ -1627,14 +2035,19 @@ async function receiveFile(connection) {
     }
     if (accepted) recordError(error);
   } finally {
-    if (!verified && writable) {
-      try { await writable.abort(); } catch (_) {}
+    const preserveVerifiedSink = localArtifactReady && terminalWriteStarted;
+    if (!completed && sink && !preserveVerifiedSink) {
+      try {
+        if (sink.state === "closed") await sink.remove();
+        else await sink.abort();
+      } catch (_) {}
     }
     hasher?.close();
     connection.close();
     if (activeFileTransfer?.connection === connection) activeFileTransfer = null;
     finishTransferItem(ui);
     tcTest.state.file = "idle";
+    await wakeLocks.release("file-transfer");
     processFileQueue();
   }
 }
@@ -1648,17 +2061,22 @@ function createIncomingTransferItem(offer) {
   const save = fragment.querySelector(".save-file");
   const reject = fragment.querySelector(".reject-file");
   const cancel = fragment.querySelector(".cancel-file");
+  const exportFile = fragment.querySelector(".export-file");
+  const deleteFile = fragment.querySelector(".delete-file");
+  const localNote = fragment.querySelector(".transfer-local-note");
   name.textContent = `${t("file_offer")}: ${offer.name}`;
   detail.textContent = format("file_offer_detail", { name: offer.name, size: humanSize(offer.size) });
-  save.textContent = t("choose_save");
+  save.textContent = fileSinkSupport.preferredKind === FILE_SINK_KIND.OPFS_EXPORT ? t("accept_receive") : t("choose_save");
   reject.textContent = t("reject");
   cancel.textContent = t("cancel");
+  exportFile.textContent = t("file_export");
+  deleteFile.textContent = t("file_delete_local");
   $("transfer-list").append(fragment);
   renderTransferCount();
-  return { item, name, detail, progress, save, reject, cancel };
+  return { item, name, detail, progress, save, reject, cancel, export: exportFile, delete: deleteFile, localNote };
 }
 
-function waitForIncomingFileDecision(ui, offer, connection) {
+function waitForIncomingFileDecision(ui, offer, connection, sinkKind) {
   return new Promise((resolve) => {
     let claimed = false;
     let resolved = false;
@@ -1705,13 +2123,19 @@ function waitForIncomingFileDecision(ui, offer, connection) {
       // This call is deliberately inside the click handler so Chrome treats it
       // as a user-initiated save decision.
       try {
-        const handle = await window.showSaveFilePicker({ suggestedName: offer.name });
-        const writable = await handle.createWritable({ keepExistingData: false });
+        const sink = await createFileSink({
+          kind: sinkKind,
+          transferId: offer.transferId,
+          name: offer.name,
+          size: offer.size,
+          mime: offer.mime,
+          hardMaxBytes: APP_CONFIG.limits.fileBytes,
+        });
         if (!claim()) {
-          try { await writable.abort(); } catch (_) {}
+          try { await sink.abort(); } catch (_) {}
           return;
         }
-        finish({ accepted: true, writable });
+        finish({ accepted: true, sink });
       } catch (error) {
         if (!claimed) await rejectOffer("USER_CANCELLED");
       }
@@ -1724,6 +2148,104 @@ function waitForIncomingFileDecision(ui, offer, connection) {
       }
     };
   });
+}
+
+function configureStagedFileUI(ui, sink, prepared) {
+  let removed = false;
+  let removalPromise = null;
+  let useDownloadFallback = !prepared.canShare;
+  const removeTemporaryFile = async () => {
+    if (removed) return true;
+    if (removalPromise) return removalPromise;
+    removalPromise = (async () => {
+      await sink.remove();
+      removed = true;
+      prepared.dispose();
+      ui.export.onclick = null;
+      ui.delete.onclick = null;
+      transferItemCleanups.delete(ui.item);
+      stagedTransferItems.delete(ui.item);
+      pruneFinishedTransferItems();
+      renderTransferCount();
+      if (!activeSession) setMobileState(restingMobileState());
+      return true;
+    })();
+    try {
+      return await removalPromise;
+    } finally {
+      removalPromise = null;
+    }
+  };
+  stagedTransferItems.add(ui.item);
+  transferItemCleanups.set(ui.item, removeTemporaryFile);
+  ui.export.classList.remove("hidden");
+  ui.delete.classList.remove("hidden");
+  ui.export.onclick = () => {
+    ui.export.disabled = true;
+    if (useDownloadFallback) {
+      try {
+        prepared.download();
+        ui.detail.textContent = t("file_download_started");
+        ui.localNote.textContent = t("file_delete_after_download");
+      } catch (error) {
+        setStatus(t("share_failed"), "error");
+        recordError(error);
+      } finally {
+        ui.export.disabled = false;
+      }
+      return;
+    }
+    void prepared.share().then(async () => {
+      ui.detail.textContent = t("file_exported");
+      ui.export.classList.add("hidden");
+      try {
+        await removeTemporaryFile();
+        ui.localNote.classList.add("hidden");
+        ui.delete.classList.add("hidden");
+      } catch (error) {
+        ui.delete.disabled = false;
+        ui.localNote.textContent = t("file_cleanup_failed");
+        setStatus(t("file_cleanup_failed"), "error");
+        recordError(error);
+      }
+    }).catch(async (error) => {
+      ui.export.disabled = false;
+      if (error?.name === "AbortError") {
+        try {
+          await removeTemporaryFile();
+          ui.detail.textContent = t("file_local_deleted");
+          ui.localNote.classList.add("hidden");
+          ui.export.classList.add("hidden");
+          ui.delete.classList.add("hidden");
+        } catch (cleanupError) {
+          ui.delete.disabled = false;
+          ui.localNote.classList.remove("hidden");
+          ui.localNote.textContent = t("file_cleanup_failed");
+          setStatus(t("file_cleanup_failed"), "error");
+          recordError(cleanupError);
+        }
+        return;
+      }
+      useDownloadFallback = true;
+      ui.detail.textContent = t("file_share_download_fallback");
+      ui.localNote.textContent = t("file_delete_after_download");
+      setStatus(t("file_share_download_fallback"), "error");
+      recordError(error);
+    });
+  };
+  ui.delete.onclick = () => {
+    ui.delete.disabled = true;
+    void removeTemporaryFile().then(() => {
+      ui.detail.textContent = t("file_local_deleted");
+      ui.localNote.classList.add("hidden");
+      ui.export.classList.add("hidden");
+      ui.delete.classList.add("hidden");
+    }).catch((error) => {
+      ui.delete.disabled = false;
+      setStatus(t("file_cleanup_failed"), "error");
+      recordError(error);
+    });
+  };
 }
 
 function cancelAllTransfers() {
@@ -1755,6 +2277,8 @@ let discardVoice = false;
 let voiceCancelled = false;
 let voicePointerHeld = false;
 let voiceGesture = 0;
+let activeVoiceStream = null;
+const voiceHoldMode = !support.mobile;
 
 async function startVoiceNote(event) {
   event.preventDefault();
@@ -1765,19 +2289,25 @@ async function startVoiceNote(event) {
     setStatus(t("unsupported_capability"), "error");
     return;
   }
-  if (event.pointerId !== undefined) event.currentTarget?.setPointerCapture?.(event.pointerId);
+  if (voiceHoldMode && event.pointerId !== undefined) event.currentTarget?.setPointerCapture?.(event.pointerId);
   voicePointerHeld = true;
   const gesture = ++voiceGesture;
   let stream = null;
+  await wakeLocks.acquire("voice-note");
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    activeVoiceStream = stream;
     // A permission prompt can outlive the press. If the user released while it
     // was visible, stop the newly granted stream without recording anything.
-    if (!voicePointerHeld || gesture !== voiceGesture) {
+    if ((voiceHoldMode && !voicePointerHeld) || gesture !== voiceGesture) {
       stream.getTracks().forEach((track) => track.stop());
+      if (activeVoiceStream === stream) activeVoiceStream = null;
+      await wakeLocks.release("voice-note");
       return;
     }
-    recorder = new MediaRecorder(stream);
+    const mimeType = selectedVoiceRecordType();
+    if (!mimeType) throw new Error(t("unsupported_capability"));
+    recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     voiceChunks = [];
     voiceBytes = 0;
     discardVoice = false;
@@ -1793,44 +2323,60 @@ async function startVoiceNote(event) {
       }
       voiceChunks.push(chunkEvent.data);
     };
-    recorder.onstop = () => finishVoiceNote(stream);
+    recorder.onstop = () => {
+      void finishVoiceNote(stream).finally(() => wakeLocks.release("voice-note"));
+    };
     recorder.start(1000);
     voiceLimitTimer = setTimeout(() => {
       if (recorder?.state === "recording") recorder.stop();
     }, APP_CONFIG.limits.voiceSeconds * 1000 - 250);
     $("ptt-btn").classList.add("recording");
     $("ptt-btn").textContent = "■";
-    setStatus(t("voice_recording"), "loading");
+    $("mobile-recording-controls")?.classList.remove("hidden");
+    setStatus(t(voiceHoldMode ? "voice_recording" : "voice_tap_stop"), "loading");
     markActivity();
   } catch (error) {
     stream?.getTracks().forEach((track) => track.stop());
+    if (activeVoiceStream === stream) activeVoiceStream = null;
     recorder = null;
     voicePointerHeld = false;
+    await wakeLocks.release("voice-note");
     setStatus(format("microphone_failed", { message: redact(error.message) }), "error");
     recordError(error);
   }
 }
 
-function stopVoiceNote(event) {
+function stopVoiceNote(event, force = false) {
   event?.preventDefault();
+  if (!voiceHoldMode && !force) return;
   voicePointerHeld = false;
   voiceGesture += 1;
   if (recorder?.state === "recording") recorder.stop();
 }
 
-function cancelVoiceNote() {
+function cancelActiveVoiceRecording() {
   voicePointerHeld = false;
   voiceGesture += 1;
   voiceCancelled = true;
   clearTimeout(voiceLimitTimer);
   if (recorder?.state === "recording") recorder.stop();
+  activeVoiceStream?.getTracks().forEach((track) => track.stop());
+  activeVoiceStream = null;
+  void wakeLocks.release("voice-note");
+}
+
+function cancelVoiceNote(event) {
+  event?.preventDefault?.();
+  cancelActiveVoiceRecording();
 }
 
 async function finishVoiceNote(stream) {
   clearTimeout(voiceLimitTimer);
   stream.getTracks().forEach((track) => track.stop());
+  if (activeVoiceStream === stream) activeVoiceStream = null;
   $("ptt-btn").classList.remove("recording");
   $("ptt-btn").textContent = "●";
+  $("mobile-recording-controls")?.classList.add("hidden");
   const finishedRecorder = recorder;
   recorder = null;
   const duration = Math.max(1, Math.min(
@@ -1839,6 +2385,7 @@ async function finishVoiceNote(stream) {
   ));
   if (voiceCancelled) {
     voiceChunks = [];
+    setStatus(t("voice_discarded"), activeSession ? "connected" : "ready");
     return;
   }
   if (discardVoice || voiceBytes > APP_CONFIG.limits.voiceBytes) {
@@ -1846,7 +2393,13 @@ async function finishVoiceNote(stream) {
     setStatus(t("voice_limit"), "error");
     return;
   }
-  const blob = new Blob(voiceChunks, { type: safeMime(finishedRecorder.mimeType, "audio/") });
+  const mime = safeVoiceMime(finishedRecorder?.mimeType);
+  if (!mime) {
+    voiceChunks = [];
+    setStatus(t("unsupported_capability"), "error");
+    return;
+  }
+  const blob = new Blob(voiceChunks, { type: mime });
   voiceChunks = [];
   try {
     setStatus(t("voice_sending"), "loading");
@@ -1854,7 +2407,7 @@ async function finishVoiceNote(stream) {
     if (payload.length > APP_CONFIG.limits.voiceBytes) throw new Error(t("voice_limit"));
     const messageId = randomID();
     const response = await sendChatEnvelopeTo(activePeerAddress, sessionMeta("VOICE", {
-      messageId, mime: safeMime(blob.type, "audio/"), duration,
+      messageId, mime: safeVoiceMime(blob.type), duration,
     }), payload, APP_CONFIG.ports.voice);
     const ack = unpackChatEnvelope(response);
     if (ack.payload.length
@@ -1880,15 +2433,17 @@ async function receiveVoice(connection) {
       APP_CONFIG.limits.voiceSeconds * 1000 + STREAM_READ_TIMEOUT_MS,
     );
     const { meta, payload } = unpackChatEnvelope(bytes);
+    const mime = safeVoiceMime(meta.mime);
     if (meta.type !== "VOICE"
       || !hasSession(meta)
       || typeof meta.messageId !== "string"
       || meta.messageId.length !== 32
       || payload.length > APP_CONFIG.limits.voiceBytes
+      || !mime
       || !Number.isFinite(meta.duration)
       || meta.duration < 0
       || meta.duration > APP_CONFIG.limits.voiceSeconds) throw new Error("voice message rejected");
-    const blob = new Blob([payload], { type: safeMime(meta.mime, "audio/") });
+    const blob = new Blob([payload], { type: mime });
     addMessage({ type: "voice", blob, duration: meta.duration, mine: false });
     await connection.write(packChatEnvelope(sessionMeta("VOICE_ACK", { messageId: meta.messageId })));
     await connection.closeWrite();
@@ -1911,6 +2466,11 @@ let liveGeneration = 0;
 let liveActivityTimer = null;
 let callSetupTimer = null;
 let currentCallId = "";
+let rtcDisconnectTimer = null;
+let iceRestartAttempted = false;
+let cameraFacingMode = "user";
+let mediaMuted = false;
+let cameraDisabled = false;
 
 function stopMediaStream(stream) {
   stream?.getTracks().forEach((track) => track.stop());
@@ -1962,16 +2522,85 @@ function createPeerConnection(generation) {
   connection.onconnectionstatechange = () => {
     if (connection !== peerConnection || generation !== liveGeneration) return;
     if (connection.connectionState === "connected") {
+      clearTimeout(rtcDisconnectTimer);
+      rtcDisconnectTimer = null;
       setMediaStatus(t("call_live"));
       beginLiveActivity();
     }
-    if (["failed", "closed"].includes(connection.connectionState)) endLiveLink(false, t("call_ended"));
+    if (connection.connectionState === "disconnected") {
+      setMediaStatus(t("call_reconnecting"));
+      clearTimeout(rtcDisconnectTimer);
+      rtcDisconnectTimer = setTimeout(() => attemptIceRestart(generation, currentCallId), 8_000);
+    }
+    if (connection.connectionState === "failed") void attemptIceRestart(generation, currentCallId);
+    if (connection.connectionState === "closed") endLiveLink(false, t("call_ended"));
   };
   return connection;
 }
 
+async function attemptIceRestart(generation, callId) {
+  if (!peerConnection || generation !== liveGeneration || callId !== currentCallId) return;
+  if (iceRestartAttempted) {
+    endLiveLink(false, t("call_ended"));
+    return;
+  }
+  iceRestartAttempted = true;
+  clearTimeout(rtcDisconnectTimer);
+  rtcDisconnectTimer = null;
+  setMediaStatus(t("call_reconnecting"));
+  try {
+    peerConnection.restartIce?.();
+    await peerConnection.setLocalDescription(await peerConnection.createOffer({ iceRestart: true }));
+    if (generation !== liveGeneration) return;
+    await waitForICE(peerConnection);
+    if (generation !== liveGeneration) return;
+    await sendControl("RTC_RESTART_OFFER", {
+      callId,
+      mode: liveMode,
+      description: peerConnection.localDescription.toJSON(),
+    });
+    rtcDisconnectTimer = setTimeout(() => {
+      if (generation === liveGeneration && peerConnection?.connectionState !== "connected") {
+        endLiveLink(false, t("call_ended"));
+      }
+    }, 15_000);
+  } catch (error) {
+    recordError(error);
+    endLiveLink(false, format("call_failed", { message: redact(error.message) }));
+  }
+}
+
+async function acceptRTCRestartOffer(meta) {
+  if (!peerConnection
+    || meta.callId !== currentCallId
+    || !meta.description?.sdp
+    || !["voice", "video", "screen"].includes(meta.mode)) return;
+  const generation = liveGeneration;
+  clearTimeout(rtcDisconnectTimer);
+  rtcDisconnectTimer = null;
+  setMediaStatus(t("call_reconnecting"));
+  await peerConnection.setRemoteDescription(meta.description);
+  await peerConnection.setLocalDescription(await peerConnection.createAnswer());
+  if (generation !== liveGeneration) return;
+  await waitForICE(peerConnection);
+  if (generation !== liveGeneration) return;
+  await sendControl("RTC_RESTART_ANSWER", {
+    callId: currentCallId,
+    mode: liveMode,
+    description: peerConnection.localDescription.toJSON(),
+  });
+}
+
+async function acceptRTCRestartAnswer(meta) {
+  if (!peerConnection || meta.callId !== currentCallId || !meta.description?.sdp) return;
+  await peerConnection.setRemoteDescription(meta.description);
+  setMediaStatus(t("call_reconnecting"));
+}
+
 function openMediaDock(mode) {
+  void wakeLocks.acquire("live-call");
   $("app").classList.add("media-open");
+  setMobileState("call");
   $("media-dock").classList.remove("hidden");
   $("media-title").textContent = mode === "screen" ? t("screen_share") : mode === "video" ? t("video_call") : t("voice_call");
 }
@@ -1984,7 +2613,10 @@ async function getOutgoingMedia(mode, generation) {
     }, { once: true });
     return stream;
   }
-  return navigator.mediaDevices.getUserMedia({ audio: true, video: mode === "video" });
+  return navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: mode === "video" ? { facingMode: { ideal: cameraFacingMode } } : false,
+  });
 }
 
 async function startLiveLink(mode) {
@@ -2005,6 +2637,9 @@ async function startLiveLink(mode) {
   currentCallId = callId;
   armCallSetupTimeout(generation, callId);
   liveMode = mode;
+  iceRestartAttempted = false;
+  mediaMuted = false;
+  cameraDisabled = false;
   openMediaDock(mode);
   setMediaStatus(t("call_requesting"));
   try {
@@ -2016,6 +2651,7 @@ async function startLiveLink(mode) {
     localMediaStream = stream;
     $("local-media").srcObject = localMediaStream;
     $("local-media").classList.toggle("hidden", !localMediaStream.getVideoTracks().length);
+    updateMediaControls();
     const connection = createPeerConnection(generation);
     localMediaStream.getTracks().forEach((track) => connection.addTrack(track, localMediaStream));
     await connection.setLocalDescription(await connection.createOffer());
@@ -2063,7 +2699,10 @@ async function answerIncomingCall() {
     // Permission is requested only here, directly after the user clicks Accept.
     const stream = offer.mode === "screen"
       ? null
-      : await navigator.mediaDevices.getUserMedia({ audio: true, video: offer.mode === "video" });
+      : await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: offer.mode === "video" ? { facingMode: { ideal: cameraFacingMode } } : false,
+      });
     if (generation !== liveGeneration) {
       stopMediaStream(stream);
       return;
@@ -2071,6 +2710,7 @@ async function answerIncomingCall() {
     localMediaStream = stream;
     $("local-media").srcObject = localMediaStream;
     $("local-media").classList.toggle("hidden", !localMediaStream?.getVideoTracks().length);
+    updateMediaControls();
     const connection = createPeerConnection(generation);
     localMediaStream?.getTracks().forEach((track) => connection.addTrack(track, localMediaStream));
     await connection.setRemoteDescription(offer.description);
@@ -2109,14 +2749,89 @@ async function acceptRTCAnswer(meta) {
   setMediaStatus(t("call_connecting"));
 }
 
+function updateMediaControls() {
+  const mute = $("media-mute");
+  const camera = $("media-camera");
+  const flip = $("media-switch-camera");
+  if (mute) {
+    const label = mediaMuted ? t("call_unmute") : t("call_mute");
+    mute.title = label;
+    mute.setAttribute("aria-label", label);
+    mute.setAttribute("aria-pressed", String(mediaMuted));
+    mute.disabled = !localMediaStream?.getAudioTracks().length;
+  }
+  if (camera) {
+    const hasCamera = Boolean(localMediaStream?.getVideoTracks().length) && liveMode === "video";
+    const label = cameraDisabled ? t("camera_on") : t("camera_off");
+    camera.title = label;
+    camera.setAttribute("aria-label", label);
+    camera.setAttribute("aria-pressed", String(cameraDisabled));
+    camera.disabled = !hasCamera;
+    camera.classList.toggle("hidden", !hasCamera);
+  }
+  if (flip) {
+    const canFlip = support.mobile && Boolean(localMediaStream?.getVideoTracks().length) && liveMode === "video";
+    flip.title = t("switch_camera");
+    flip.setAttribute("aria-label", t("switch_camera"));
+    flip.disabled = !canFlip;
+    flip.classList.toggle("hidden", !canFlip);
+  }
+}
+
+function toggleMediaMute() {
+  mediaMuted = !mediaMuted;
+  for (const track of localMediaStream?.getAudioTracks() || []) track.enabled = !mediaMuted;
+  updateMediaControls();
+}
+
+function toggleMediaCamera() {
+  cameraDisabled = !cameraDisabled;
+  for (const track of localMediaStream?.getVideoTracks() || []) track.enabled = !cameraDisabled;
+  updateMediaControls();
+}
+
+async function switchMediaCamera() {
+  if (!peerConnection || liveMode !== "video") return;
+  const sender = peerConnection.getSenders().find(({ track }) => track?.kind === "video");
+  if (!sender) return;
+  const nextFacing = cameraFacingMode === "user" ? "environment" : "user";
+  let replacementStream = null;
+  let installed = false;
+  try {
+    replacementStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: nextFacing } },
+      audio: false,
+    });
+    const replacement = replacementStream.getVideoTracks()[0];
+    if (!replacement) throw new Error("camera track unavailable");
+    replacement.enabled = !cameraDisabled;
+    const previous = sender.track;
+    await sender.replaceTrack(replacement);
+    installed = true;
+    localMediaStream?.removeTrack?.(previous);
+    localMediaStream?.addTrack?.(replacement);
+    previous?.stop();
+    cameraFacingMode = nextFacing;
+    $("local-media").srcObject = localMediaStream;
+    updateMediaControls();
+  } catch (error) {
+    if (!installed) stopMediaStream(replacementStream);
+    recordError(error);
+    setMediaStatus(format("call_failed", { message: redact(error.message) }));
+  }
+}
+
 async function endLiveLink(notifyPeer = false, message = "") {
   liveGeneration += 1;
   clearTimeout(callSetupTimer);
   callSetupTimer = null;
+  clearTimeout(rtcDisconnectTimer);
+  rtcDisconnectTimer = null;
   clearInterval(liveActivityTimer);
   liveActivityTimer = null;
   const endedCallId = currentCallId || pendingCallOffer?.callId || "";
   currentCallId = "";
+  iceRestartAttempted = false;
   const hadLink = Boolean(peerConnection || localMediaStream || pendingCallOffer);
   const connection = peerConnection;
   peerConnection = null;
@@ -2130,6 +2845,9 @@ async function endLiveLink(notifyPeer = false, message = "") {
   $("media-dock").classList.remove("expanded");
   $("media-dock").classList.add("hidden");
   $("app").classList.remove("media-open");
+  void wakeLocks.release("live-call");
+  setMobileState(activeSession ? "connected" : restingMobileState());
+  updateMediaControls();
   setMediaStatus(message || t("call_ended"));
   if (notifyPeer && hadLink && activeSession && endedCallId) {
     await sendControl("RTC_HANGUP", { callId: endedCallId }).catch(() => {});
@@ -2179,6 +2897,26 @@ async function copyWithFeedback(button, value, labelKey) {
   setTimeout(() => { button.textContent = t(labelKey); }, 1200);
 }
 
+async function shareInvite() {
+  if (!localAddress) return;
+  const value = inviteURL(localAddress);
+  if (typeof navigator.share !== "function") {
+    await copyWithFeedback($("share-invite"), value, "native_share");
+    return;
+  }
+  try {
+    await navigator.share({ title: "tailcat.app", text: t("invite_ready_body"), url: value });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    recordError(error);
+    try {
+      await copyWithFeedback($("share-invite"), value, "native_share");
+    } catch (_) {
+      setStatus(t("share_failed"), "error");
+    }
+  }
+}
+
 $("persist-key").addEventListener("change", () => {
   $("persist-risk").classList.toggle("hidden", !$("persist-key").checked);
 });
@@ -2191,6 +2929,7 @@ $("forget-key").addEventListener("click", async () => {
     $("send-progress").textContent = t("persistent_forgotten");
   } catch (error) {
     recordError(error);
+    setPersistenceAvailable(false);
   }
 });
 $("listen-btn").addEventListener("click", () => startRoom());
@@ -2201,7 +2940,14 @@ $("send-addr").addEventListener("keydown", (event) => {
   if (event.key === "Enter") connectToPeer($("send-addr").value);
 });
 $("copy-invite").addEventListener("click", () => copyWithFeedback($("copy-invite"), inviteURL(localAddress), "copy_invite"));
+$("share-invite")?.addEventListener("click", shareInvite);
 $("copy-addr").addEventListener("click", () => copyWithFeedback($("copy-addr"), localAddress, "copy_address"));
+$("mobile-menu-btn")?.addEventListener("click", () => setMobileSheet(true));
+$("mobile-sheet-close")?.addEventListener("click", () => setMobileSheet(false));
+$("mobile-sheet-backdrop")?.addEventListener("click", () => setMobileSheet(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("app").dataset.mobileSheet === "open") setMobileSheet(false);
+});
 $("show-qr").addEventListener("click", () => {
   try {
     drawInviteQR(inviteURL(localAddress));
@@ -2215,7 +2961,7 @@ $("qr-close").addEventListener("click", () => $("qr-dialog").close());
 $("qr-dialog").addEventListener("click", (event) => { if (event.target === $("qr-dialog")) $("qr-dialog").close(); });
 $("send-text-btn").addEventListener("click", sendText);
 $("send-text").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
     if (!event.repeat) sendText();
   }
@@ -2248,9 +2994,15 @@ document.addEventListener("drop", (event) => {
   enqueueFiles(event.dataTransfer.files);
 });
 
-$("ptt-btn").addEventListener("pointerdown", startVoiceNote);
-window.addEventListener("pointerup", stopVoiceNote);
-window.addEventListener("pointercancel", stopVoiceNote);
+if (voiceHoldMode) {
+  $("ptt-btn").addEventListener("pointerdown", startVoiceNote);
+  window.addEventListener("pointerup", stopVoiceNote);
+  window.addEventListener("pointercancel", stopVoiceNote);
+} else {
+  $("ptt-btn").addEventListener("click", startVoiceNote);
+  $("mobile-record-send")?.addEventListener("click", (event) => stopVoiceNote(event, true));
+  $("mobile-record-cancel")?.addEventListener("click", cancelVoiceNote);
+}
 $("voice-call-btn").addEventListener("click", () => startLiveLink("voice"));
 $("video-call-btn").addEventListener("click", () => startLiveLink("video"));
 $("screen-share-btn").addEventListener("click", () => startLiveLink("screen"));
@@ -2261,6 +3013,9 @@ $("incoming-call-dialog").addEventListener("cancel", (event) => {
   declineIncomingCall();
 });
 $("media-hangup").addEventListener("click", () => endLiveLink(true));
+$("media-mute")?.addEventListener("click", toggleMediaMute);
+$("media-camera")?.addEventListener("click", toggleMediaCamera);
+$("media-switch-camera")?.addEventListener("click", switchMediaCamera);
 $("media-expand").addEventListener("click", () => {
   const expanded = $("media-dock").classList.toggle("expanded");
   $("media-expand").textContent = expanded ? "▣" : "□";
@@ -2271,11 +3026,35 @@ window.addEventListener("beforeunload", () => {
   listener?.close();
   activeFileTransfer?.connection?.close();
   activeFileTransfer?.entry?.connection?.close();
+  void wakeLocks.cleanup();
+  visualViewportSync.cleanup();
+});
+
+subscribePageLifecycle({
+  hidden: notePageBackgrounded,
+  freeze: notePageBackgrounded,
+  visible: resumeForegroundSession,
+  resume: resumeForegroundSession,
+  pagehide: ({ persisted }) => {
+    notePageBackgrounded();
+    if (!persisted) {
+      listener?.close();
+      activeFileTransfer?.connection?.close();
+      activeFileTransfer?.entry?.connection?.close();
+    }
+  },
+  pageshow: resumeForegroundSession,
 });
 
 window.addEventListener("hashchange", () => {
   const address = consumeInviteFragment();
-  if (support.ok && address) connectToPeer(address);
+  if (!address) return;
+  if (support.ok) {
+    void connectToPeer(address);
+  } else {
+    pendingInviteAddress = address;
+    $("blocked-invite-copy").classList.remove("hidden");
+  }
 });
 
 // ---- WASM startup and diagnostics --------------------------------------
@@ -2338,6 +3117,19 @@ async function protocolSelfTest() {
     "frame-boundaries": equalBytes(magic, TCF_MAGIC) && data.payload.length === 3 && data.payload[2] === 99 && decodedOffer.name === "safe.txt" && final.size === 3,
     "file-name": sanitizeFileName("../bad\\name\u0000.txt") === "name.txt",
     "file-sizes": validFileSize(APP_CONFIG.limits.fileBytes) && !validFileSize(APP_CONFIG.limits.fileBytes + 1),
+    "voice-mime": safeVoiceMime(" AUDIO/WEBM ; CODECS=\"OPUS\" ") === "audio/webm;codecs=opus"
+      && safeVoiceMime("audio/mp4;codecs=mp4a.40.2") === "audio/mp4;codecs=mp4a.40.2"
+      && safeVoiceMime("audio/webm;codecs=vorbis") === ""
+      && safeVoiceMime("audio/mp4;codecs=opus") === ""
+      && safeVoiceMime("text/plain") === ""
+      && selectMutualVoiceType(
+        ["audio/webm;codecs=opus"],
+        ["audio/webm;codecs=vorbis", "audio/mp4;codecs=mp4a.40.2"],
+      ) === ""
+      && selectMutualVoiceType(
+        ["audio/mp4;codecs=mp4a.40.2"],
+        ["audio/mp4; codecs=\"mp4a.40.2\""],
+      ) === "audio/mp4;codecs=mp4a.40.2",
     sha256: digest === expected && data.payload.length === 3,
     "session-lock": sessionMatches({ v: APP_CONFIG.protocolVersion, session }, session)
       && !sessionMatches({ v: APP_CONFIG.protocolVersion, session: "2".repeat(32) }, session),
@@ -2358,6 +3150,7 @@ tcTest.runProtocolSelfTest = protocolSelfTest;
 
 async function bootstrap() {
   $("app").setAttribute("aria-busy", "true");
+  await Promise.all([probePersistence(), refreshFileSinkSupport()]);
   await loadRememberedKey();
   if (!APP_CONFIG.roomsEnabled) {
     pendingInviteAddress = "";

@@ -40,7 +40,7 @@ test("exchanges text and a verified file through the live Tokyo DERP relay", asy
     const offer = host.locator(".incoming-transfer", { hasText: "live-one-byte.bin" });
     await expect(offer).toBeVisible({ timeout: 90_000 });
     await offer.locator(".save-file").click();
-    await expect(guest.locator(".transfer-item", { hasText: "live-one-byte.bin" })).toContainText(/saved and verified/i, { timeout: 90_000 });
+    await expect(guest.locator(".transfer-item", { hasText: "live-one-byte.bin" })).toContainText(/received and SHA-256 verified/i, { timeout: 90_000 });
     expect(await host.evaluate(() => globalThis.__mockSave)).toEqual(expect.objectContaining({
       totalBytes: 1,
       closed: true,

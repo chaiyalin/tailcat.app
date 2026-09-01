@@ -3,11 +3,15 @@
 // a visitor to an untrusted relay map.
 
 export const APP_CONFIG = Object.freeze({
-  version: "0.1.0-beta.1",
+  version: "0.2.0-beta.1",
   protocolVersion: 1,
   // Emergency beta kill switch. Set false and redeploy this static file to
   // leave the explanatory site online while preventing new rooms.
   roomsEnabled: true,
+  mobile: Object.freeze({
+    androidEnabled: true,
+    iosEnabled: true,
+  }),
   derpMapURL: "https://tailcat.dev/derpmap.json",
   idleTimeoutMs: 30 * 60 * 1000,
   ports: Object.freeze({ control: 100, text: 101, file: 102, voice: 103 }),
