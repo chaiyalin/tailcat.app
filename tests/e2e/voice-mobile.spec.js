@@ -156,6 +156,11 @@ test("peer cleanup cancels an active recording, microphone, and wake lock", asyn
   await expect(recorderPage.locator("#status")).toContainText(/recording|tap again|录音/iu);
   await expect.poll(() => recorderPage.evaluate(() => globalThis.__wakeRequests)).toBeGreaterThan(0);
 
+  // Connected mobile rooms move room controls into the off-canvas drawer.
+  // Exercise the visible user path so WebKit does not wait on an element that
+  // is intentionally outside the viewport.
+  await peerPage.locator("#mobile-menu-btn").click();
+  await expect(peerPage.locator("#stop-listen-btn")).toBeVisible();
   await peerPage.locator("#stop-listen-btn").click();
   await expect.poll(() => recorderPage.evaluate(() => globalThis.tcTest.state.peer)).toBe("none");
   await expect.poll(() => recorderPage.evaluate(() => globalThis.__voiceTrackStops)).toBeGreaterThan(0);
