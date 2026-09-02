@@ -26,7 +26,7 @@ export default defineConfig({
     { name: "edge", testIgnore: /mobile\.spec\.js/u, use: { channel: "msedge" } },
     {
       name: "android-chrome",
-      testMatch: /mobile\.spec\.js/u,
+      testMatch: /(?:^|\/)(?:mobile|[^/]+-mobile)\.spec\.js$/u,
       use: {
         channel: "chrome",
         userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
@@ -38,7 +38,7 @@ export default defineConfig({
     },
     {
       name: "ios-safari",
-      testMatch: /mobile\.spec\.js/u,
+      testMatch: /(?:^|\/)(?:mobile|[^/]+-mobile)\.spec\.js$/u,
       use: {
         browserName: "webkit",
         userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
