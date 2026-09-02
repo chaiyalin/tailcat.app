@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 // The tailcat web app is the WebAssembly (js/wasm) build of tailcat
-// for browsers. It exposes tailcatListen, tailcatDial, and
-// tailcatNewSHA256 as global JavaScript functions that app.js uses
+// for browsers. It exposes tailcatListen, tailcatDial, tailcatConnect,
+// tailcatConfigureTransport, and tailcatNewSHA256 as global JavaScript
+// functions that app.js uses
 // to implement streaming file sharing. The browser reaches DERP relays over WebSockets,
 // which tailscale.com's derphttp package does automatically under
 // GOOS=js.
@@ -34,6 +35,8 @@ import (
 func main() {
 	js.Global().Set("tailcatListen", js.FuncOf(tailcatListen))
 	js.Global().Set("tailcatDial", js.FuncOf(tailcatDial))
+	js.Global().Set("tailcatConnect", js.FuncOf(tailcatConnect))
+	js.Global().Set("tailcatConfigureTransport", js.FuncOf(tailcatConfigureTransport))
 	js.Global().Set("tailcatNewSHA256", js.FuncOf(tailcatNewSHA256))
 	if f := js.Global().Get("onTailcatReady"); f.Type() == js.TypeFunction {
 		f.Invoke()
@@ -92,6 +95,7 @@ func tailcatListen(this js.Value, args []js.Value) any {
 			pk = tailcat.NewPrivateKey()
 			pk.Public.RegionID = -1 // auto-select
 		}
+		markTransportStarted()
 		if hasRequestedRegion {
 			// An explicit selection overrides the region stored with a
 			// remembered key while retaining the node identity.
@@ -303,6 +307,7 @@ func tailcatDial(this js.Value, args []js.Value) any {
 			Logf:       logf,
 			DERPMapURL: derpMapURL,
 		}
+		markTransportStarted()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := pingUntil(ctx, cl); err != nil {
