@@ -17,11 +17,16 @@ export async function installMockTailcat(page, namespace) {
     const connections = new Map();
     const pendingDials = new Map();
     const records = [];
+    const clients = [];
     let listener = null;
     let listenerSequence = 0;
     let corruptNextFileData = false;
     let fileWriteDelayMs = 0;
     let failControlDials = false;
+    let legacyDialCount = 0;
+    let mockPath = "webrtc";
+    let connectDelayMs = 0;
+    let failNextHelloConfirmCloseWrite = false;
 
     function stableHex(value) {
       // This is only an address identity function for the transport fixture,
@@ -78,12 +83,13 @@ export async function installMockTailcat(page, namespace) {
       else state.queue.push(bytes);
     }
 
-    function makeConnection({ id, peer, port, direction }) {
+    function makeConnection({ id, peer, port, direction, clientId = null }) {
       const record = {
         id,
         peer,
         port,
         direction,
+        clientId,
         writeSizes: [],
         capturedBytes: 0,
         capture: [],
@@ -150,6 +156,12 @@ export async function installMockTailcat(page, namespace) {
           state.localWriteClosed = true;
           record.localWriteClosed = true;
           parseEnvelope(record);
+          if (failNextHelloConfirmCloseWrite
+            && record.direction === "outbound"
+            && record.envelope?.type === "HELLO_CONFIRM") {
+            failNextHelloConfirmCloseWrite = false;
+            throw new Error("mock HELLO_CONFIRM closeWrite failure");
+          }
           channel.postMessage({ type: "EOF", from: endpoint, to: state.peer, id });
         },
         close() {
@@ -223,7 +235,7 @@ export async function installMockTailcat(page, namespace) {
       return internal.public;
     };
 
-    const dial = async (options = {}) => {
+    const openDial = async (options = {}, clientId = null) => {
       if (failControlDials && Number(options.port) === 100) {
         throw new Error("mock control path unavailable");
       }
@@ -233,6 +245,7 @@ export async function installMockTailcat(page, namespace) {
         peer: "pending",
         port: Number(options.port),
         direction: "outbound",
+        clientId,
       });
       const state = connections.get(id);
       return new Promise((resolve, reject) => {
@@ -260,6 +273,65 @@ export async function installMockTailcat(page, namespace) {
       });
     };
 
+    const dial = async (options = {}) => {
+      legacyDialCount += 1;
+      return openDial(options);
+    };
+
+    const connect = async (options = {}) => {
+      const signal = options.signal;
+      const record = {
+        id: crypto.randomUUID(),
+        addr: options.addr,
+        closed: false,
+        signalProvided: Boolean(signal && typeof signal.addEventListener === "function"),
+        aborted: Boolean(signal?.aborted),
+        dialPorts: [],
+        statusCalls: 0,
+      };
+      clients.push(record);
+      const onAbort = () => {
+        record.aborted = true;
+        record.closed = true;
+      };
+      signal?.addEventListener?.("abort", onAbort, { once: true });
+      if (connectDelayMs > 0) {
+        await new Promise((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new DOMException("mock persistent client aborted", "AbortError"));
+            return;
+          }
+          const timer = setTimeout(resolve, connectDelayMs);
+          signal?.addEventListener?.("abort", () => {
+            clearTimeout(timer);
+            reject(new DOMException("mock persistent client aborted", "AbortError"));
+          }, { once: true });
+        });
+      }
+      if (signal?.aborted) throw new DOMException("mock persistent client aborted", "AbortError");
+      return {
+        async dial({ port } = {}) {
+          if (record.closed) throw new Error("mock persistent client is closed");
+          record.dialPorts.push(Number(port));
+          return openDial({ addr: record.addr, port }, record.id);
+        },
+        async status() {
+          if (record.closed) throw new Error("mock persistent client is closed");
+          record.statusCalls += 1;
+          return {
+            state: "ready",
+            path: mockPath,
+            latencyMs: mockPath === "derp" ? 80 : 8,
+            derpRegionID: 304,
+            derpRegionCode: "tok",
+          };
+        },
+        close() {
+          record.closed = true;
+        },
+      };
+    };
+
     // OPEN_ACK tells us which endpoint owns the address. Capture it before
     // resolving the dial so subsequent DATA messages are addressed correctly.
     const originalOnMessage = channel.onmessage;
@@ -274,6 +346,7 @@ export async function installMockTailcat(page, namespace) {
 
     globalThis.tailcatListen = listen;
     globalThis.tailcatDial = dial;
+    globalThis.tailcatConnect = connect;
     globalThis.__mockTailcat = {
       endpoint,
       setCorruptNextFileData(value = true) {
@@ -284,6 +357,15 @@ export async function installMockTailcat(page, namespace) {
       },
       setFailControlDials(value = true) {
         failControlDials = Boolean(value);
+      },
+      setPath(path = "webrtc") {
+        mockPath = String(path);
+      },
+      setConnectDelay(ms = 0) {
+        connectDelayMs = Math.max(0, Number(ms) || 0);
+      },
+      failNextHelloConfirmCloseWrite() {
+        failNextHelloConfirmCloseWrite = true;
       },
       async sendEnvelope(addr, envelope, port = 100) {
         const connection = await dial({ addr, port });
@@ -310,18 +392,31 @@ export async function installMockTailcat(page, namespace) {
             id: record.id,
             port: record.port,
             direction: record.direction,
+            clientId: record.clientId,
             writeSizes: [...record.writeSizes],
             envelope: record.envelope ? { ...record.envelope } : null,
             corrupted: Boolean(record.corrupted),
             localWriteClosed: record.localWriteClosed,
             closed: record.closed,
           })),
+          clients: clients.map((client) => ({
+            id: client.id,
+            addr: client.addr,
+            closed: client.closed,
+            signalProvided: client.signalProvided,
+            aborted: client.aborted,
+            dialPorts: [...client.dialPorts],
+            statusCalls: client.statusCalls,
+          })),
+          legacyDialCount,
+          path: mockPath,
         };
       },
     };
     globalThis.tcTest.mockTransport = true;
     addEventListener("pagehide", () => {
       for (const state of connections.values()) state.connection.close();
+      for (const client of clients) client.closed = true;
       channel.close();
     }, { once: true });
   }, { namespace });
@@ -415,8 +510,18 @@ export async function installMockVoiceMedia(page) {
   });
 }
 
-export async function openMockPage(context, namespace) {
+export async function openMockPage(context, namespace, { webRTCLab } = {}) {
   const page = await context.newPage();
+  if (typeof webRTCLab === "boolean") {
+    await page.route("**/build-info.js", async (route) => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        /(__TAILCAT_WEBRTC_LAB__:\s*\{\s*value:\s*)(?:true|false)/u,
+        `$1${String(webRTCLab)}`,
+      );
+      await route.fulfill({ response, body });
+    });
+  }
   await page.goto("/");
   await installMockTailcat(page, namespace);
   return page;

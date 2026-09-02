@@ -25,7 +25,7 @@
     <h1>公开测试条款 / Public beta terms</h1>
     <p class="lede">这是一个无账号、无离线存储的实验性一对一传输工具。使用即表示你理解测试版的限制，并同意本条款与可接受使用政策。</p>
     <p class="lede" lang="en">This is an experimental, accountless, one-to-one transfer tool with no offline storage. By using it, you acknowledge the beta limitations and agree to these terms and the Acceptable Use Policy.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-01</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-02</p>
 
     <div class="notice warning">
       <p><strong>测试版 / Beta:</strong> 服务可能限速、中断、丢失连接、重置持久地址或发生协议不兼容；没有可用性、吞吐量、送达或数据恢复保证。The service can be rate-limited, interrupted, lose connections, reset persistent addresses, or become protocol-incompatible. There is no availability, throughput, delivery, or recovery guarantee.</p>
@@ -43,7 +43,7 @@
         <p>持有邀请链接或 Tailcat 地址的人可能连接房间。端到端加密保护传输内容，但不会证明对端身份。你应通过可信渠道交换邀请，并自行确认通信对象。</p>
 
         <h2>3. 测试基础设施</h2>
-        <p>浏览器 Tailcat 流量使用公共 DERP 中继。公共中继限速、无 SLA、无吞吐量目标，可能随时变更或停止。实时媒体使用 WebRTC 和公共 STUN，不提供 TURN，所以某些网络无法通话。我们可以为安全、容量、合规或维护需要更改、暂停或停止部分或全部服务。</p>
+        <p>实验版本先通过公共 DERP 建立 Tailcat 连接，再尝试使用 WebRTC 直传仍受 WireGuard 保护的数据；无法直连时继续或回退到 DERP。公共中继限速、无 SLA、无吞吐量目标，可能随时变更或停止。数据直连和实时媒体只使用公共 STUN，不提供 TURN，所以某些网络无法直连或通话。我们可以为安全、容量、合规或维护需要关闭实验、回退 DERP、更改、暂停或停止部分或全部服务。</p>
 
         <h2>4. 你的责任</h2>
         <ul>
@@ -87,7 +87,7 @@
         <p>A person who holds an invitation link or Tailcat address may be able to connect. End-to-end encryption protects transferred content but does not prove peer identity. Exchange invitations through a trusted channel and verify the person you intend to reach.</p>
 
         <h2>3. Beta infrastructure</h2>
-        <p>Browser Tailcat traffic uses public DERP relays. Those relays are rate-limited, have no SLA or throughput target, and may change or stop at any time. Live media uses WebRTC and public STUN with no TURN fallback, so calls fail on some networks. We may change, suspend, or discontinue any part of the service for security, capacity, compliance, or maintenance.</p>
+        <p>The experimental build starts Tailcat connections through public DERP, then tries to carry WireGuard-protected data directly over WebRTC; it remains on or falls back to DERP when direct connectivity is unavailable. Public relays are rate-limited, have no SLA or throughput target, and may change or stop at any time. Data paths and live media use public STUN with no TURN fallback, so direct connectivity or calls fail on some networks. We may disable the experiment, return to DERP, change, suspend, or discontinue any part of the service for security, capacity, compliance, or maintenance.</p>
 
         <h2>4. Your responsibilities</h2>
         <ul>

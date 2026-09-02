@@ -34,6 +34,7 @@ const FILE_DECISION_TIMEOUT_MS = 2 * 60 * 1000;
 // may take up to roughly one minute while a DERP path is established.
 const HANDSHAKE_TIMEOUT_MS = 4 * 60 * 1000;
 const HANDSHAKE_CONFIRM_TIMEOUT_MS = 2 * 60 * 1000;
+const HANDSHAKE_CANCEL_TIMEOUT_MS = 5_000;
 const MESSAGE_HISTORY_MAX_ITEMS = 100;
 const MESSAGE_HISTORY_MAX_BYTES = 32 * 1024 * 1024;
 const HANDSHAKE_REPLY_LIMIT = 8;
@@ -44,6 +45,8 @@ const HEARTBEAT_RESPONSE_TIMEOUT_MS = 20 * 1000;
 const MAX_PENDING_FILES = 100;
 const MAX_TRANSFER_HISTORY_ITEMS = 100;
 const DB_PROBE_KEY = `${DB_KEY}-probe`;
+const MAGICKSOCK_WEBRTC = APP_CONFIG.experimental.magicsockWebRTC;
+const TRANSPORT_PATHS = Object.freeze(["unknown", "derp", "webrtc"]);
 const VOICE_MIME_CANDIDATES = Object.freeze([
   "audio/webm;codecs=opus",
   "audio/mp4;codecs=mp4a.40.2",
@@ -128,6 +131,7 @@ const support = browserSupport();
 
 const tcTest = {
   ready: false,
+  version: APP_CONFIG.version,
   inviteConsumed: hadInviteFragment && location.hash === "",
   unsupported: !support.ok,
   runtime: {
@@ -146,6 +150,12 @@ const tcTest = {
   errors: [],
   state: {
     transport: "loading",
+    localPath: "unknown",
+    peerPath: "unknown",
+    bilateralPath: "unknown",
+    localPathRevision: 0,
+    peerPathRevision: 0,
+    persistentTransport: false,
     room: "closed",
     peer: "none",
     file: "idle",
@@ -369,13 +379,23 @@ function rebuildRegions() {
   $("region-select").value = regionByCode(current).code;
 }
 
+function renderExperimentDisclosure() {
+  const enabled = MAGICKSOCK_WEBRTC.enabled;
+  $("experiment-pill").classList.toggle("hidden", !enabled);
+  $("experiment-banner").classList.toggle("hidden", !enabled);
+  $("experiment-version").textContent = enabled ? APP_CONFIG.version : "";
+  $("encryption-note").textContent = t(enabled ? "encryption_note_experiment" : "encryption_note");
+}
+
 function applyLanguage(language) {
   i18n.setLanguage(language);
   $("language-select").value = i18n.language;
   $("blocked-language-select").value = i18n.language;
   rebuildRegions();
   renderConnectionState();
+  renderTransportPaths();
   renderRuntimeCapabilityNote();
+  renderExperimentDisclosure();
   if (support.mobile) {
     $("ptt-btn").title = t("voice_tap_start");
     $("ptt-btn").setAttribute("aria-label", t("voice_tap_start"));
@@ -384,6 +404,7 @@ function applyLanguage(language) {
 }
 
 i18n.apply();
+renderExperimentDisclosure();
 $("language-select").value = i18n.language;
 $("blocked-language-select").value = i18n.language;
 $("language-select").addEventListener("change", (event) => applyLanguage(event.target.value));
@@ -638,8 +659,104 @@ async function writeChunked(connection, bytes, chunkSize = APP_CONFIG.limits.fil
   }
 }
 
+let outboundPeerTransport = null;
+
+function persistentTransportEnabled() {
+  return MAGICKSOCK_WEBRTC.enabled && typeof globalThis.tailcatConnect === "function";
+}
+
+function persistentTransportAddress() {
+  return activePeerAddress || pendingPeerAddress || pendingInboundHandshake?.replyTo || "";
+}
+
+function closeOutboundPeerTransport(address = "") {
+  const slot = outboundPeerTransport;
+  if (!slot || (address && slot.address !== address)) return;
+  outboundPeerTransport = null;
+  slot.closed = true;
+  slot.controller.abort();
+  try {
+    slot.client?.close();
+  } catch (error) {
+    recordError(error);
+  }
+  if (!slot.client) {
+    void slot.promise?.then((client) => {
+      try {
+        client.close();
+      } catch (error) {
+        recordError(error);
+      }
+    }, () => {});
+  }
+  tcTest.state.persistentTransport = false;
+}
+
+async function getOutboundPeerTransport(address) {
+  if (!persistentTransportEnabled()) return null;
+  const normalized = String(address || "");
+  if (!normalized || normalized !== persistentTransportAddress()) return null;
+  if (outboundPeerTransport?.address === normalized && !outboundPeerTransport.closed) {
+    return outboundPeerTransport.promise;
+  }
+  closeOutboundPeerTransport();
+  const slot = {
+    address: normalized,
+    client: null,
+    closed: false,
+    controller: new AbortController(),
+    promise: null,
+  };
+  outboundPeerTransport = slot;
+  slot.promise = Promise.resolve(globalThis.tailcatConnect({
+    addr: normalized,
+    derpMapURL: APP_CONFIG.derpMapURL,
+    signal: slot.controller.signal,
+  })).then((client) => {
+    if (!client || typeof client.dial !== "function" || typeof client.status !== "function" || typeof client.close !== "function") {
+      throw new Error("tailcatConnect returned an invalid client");
+    }
+    if (slot.closed || outboundPeerTransport !== slot) {
+      client.close();
+      throw new Error("peer transport was closed while connecting");
+    }
+    slot.client = client;
+    tcTest.state.persistentTransport = true;
+    return client;
+  }).catch((error) => {
+    if (outboundPeerTransport === slot) outboundPeerTransport = null;
+    tcTest.state.persistentTransport = false;
+    throw error;
+  });
+  return slot.promise;
+}
+
+async function dialPeerStream(address, port) {
+  const persistent = await getOutboundPeerTransport(address);
+  if (persistent) return persistent.dial({ port });
+  return globalThis.tailcatDial({
+    addr: address,
+    derpMapURL: APP_CONFIG.derpMapURL,
+    port,
+  });
+}
+
 async function sendChatEnvelopeTo(address, meta, payload, port, responseTimeoutMs = STREAM_READ_TIMEOUT_MS) {
-  const connection = await tailcatDial({
+  const connection = await dialPeerStream(address, port);
+  try {
+    await writeChunked(connection, packChatEnvelope(meta, payload));
+    await connection.closeWrite();
+    return await readAllBounded(connection, 1024, responseTimeoutMs);
+  } finally {
+    connection.close();
+  }
+}
+
+async function sendLegacyChatEnvelopeTo(address, meta, payload, port, responseTimeoutMs) {
+  // Handshake cancellation must not depend on the persistent Client it is
+  // cancelling. A separate one-shot dial lets room teardown abort that Client
+  // immediately without racing the best-effort HELLO_CANCEL notification.
+  const connection = await globalThis.tailcatDial({
     addr: address,
     derpMapURL: APP_CONFIG.derpMapURL,
     port,
@@ -676,6 +793,166 @@ let lastAuthenticatedPeerTrafficAt = 0;
 const inboundConnectionCounts = new Map();
 const handshakeReplyTimes = [];
 let activeHandshakeRejects = 0;
+let pathProbeTimer = null;
+let pathProbeGeneration = 0;
+let pathProbeStartedAt = 0;
+let localTransportPath = "unknown";
+let peerTransportPath = "unknown";
+let localPathRevision = 0;
+let peerPathRevision = 0;
+let lastAnnouncedTransportPath = "";
+
+function supportsAuthenticatedPathStatus(capabilities = peerCapabilities) {
+  return persistentTransportEnabled()
+    && capabilities?.transport?.magicsockWebRTC === true
+    && capabilities.transport.pathStatus === MAGICKSOCK_WEBRTC.pathStatusVersion;
+}
+
+function normalizeTransportPath(value) {
+  const path = String(value || "unknown");
+  return TRANSPORT_PATHS.includes(path) ? path : "unknown";
+}
+
+function transportPathLabel(path) {
+  const keys = {
+    unknown: "path_unknown",
+    derp: "path_derp",
+    webrtc: "path_webrtc",
+    unsupported: "path_unsupported",
+  };
+  return t(keys[path] || keys.unknown);
+}
+
+function renderTransportPaths() {
+  const connected = Boolean(activeSession && activePeerAddress);
+  $("transport-paths").classList.toggle("hidden", !connected);
+  const peerSupportsStatus = connected && supportsAuthenticatedPathStatus();
+  const visiblePeerPath = peerSupportsStatus ? peerTransportPath : "unsupported";
+  const localLabel = $("local-path-label");
+  const peerLabel = $("peer-path-label");
+  localLabel.dataset.path = localTransportPath;
+  peerLabel.dataset.path = visiblePeerPath;
+  localLabel.textContent = transportPathLabel(localTransportPath);
+  peerLabel.textContent = transportPathLabel(visiblePeerPath);
+
+  let bilateral = "unknown";
+  let note = "";
+  if (connected && !peerSupportsStatus) {
+    bilateral = "legacy";
+    note = t("path_peer_legacy");
+  } else if (localTransportPath === "webrtc" && peerTransportPath === "webrtc") {
+    bilateral = "webrtc";
+    note = t("path_bilateral_direct");
+  } else if (localTransportPath === "derp" && peerTransportPath === "derp") {
+    bilateral = "derp";
+  } else if (connected && (localTransportPath !== "unknown" || peerTransportPath !== "unknown")) {
+    bilateral = "mixed";
+    note = t("path_mixed");
+  }
+  const noteElement = $("transport-path-note");
+  noteElement.textContent = note;
+  noteElement.classList.toggle("hidden", !note);
+  tcTest.state.localPath = localTransportPath;
+  tcTest.state.peerPath = visiblePeerPath;
+  tcTest.state.bilateralPath = bilateral;
+  tcTest.state.localPathRevision = localPathRevision;
+  tcTest.state.peerPathRevision = peerPathRevision;
+}
+
+function stopTransportPathProbes({ reset = true } = {}) {
+  clearTimeout(pathProbeTimer);
+  pathProbeTimer = null;
+  pathProbeGeneration += 1;
+  pathProbeStartedAt = 0;
+  if (reset) {
+    localTransportPath = "unknown";
+    peerTransportPath = "unknown";
+    localPathRevision = 0;
+    peerPathRevision = 0;
+    lastAnnouncedTransportPath = "";
+  }
+  renderTransportPaths();
+}
+
+async function announceTransportPath(generation, session, address) {
+  if (!supportsAuthenticatedPathStatus()
+    || generation !== pathProbeGeneration
+    || session !== activeSession
+    || address !== activePeerAddress) return;
+  if (lastAnnouncedTransportPath === localTransportPath) return;
+  localPathRevision += 1;
+  renderTransportPaths();
+  await sendControl("PATH_STATUS", {
+    revision: localPathRevision,
+    path: localTransportPath,
+  });
+  if (generation === pathProbeGeneration && session === activeSession && address === activePeerAddress) {
+    lastAnnouncedTransportPath = localTransportPath;
+  }
+}
+
+function scheduleTransportPathProbe(generation, index) {
+  if (generation !== pathProbeGeneration || !activeSession || !activePeerAddress) return;
+  const delays = MAGICKSOCK_WEBRTC.probeDelaysMs;
+  const delay = index < delays.length
+    ? Math.max(0, delays[index] - (Date.now() - pathProbeStartedAt))
+    : MAGICKSOCK_WEBRTC.steadyProbeIntervalMs;
+  pathProbeTimer = setTimeout(async () => {
+    if (generation !== pathProbeGeneration || !activeSession || !activePeerAddress) return;
+    const session = activeSession;
+    const address = activePeerAddress;
+    try {
+      try {
+        const client = await getOutboundPeerTransport(address);
+        if (!client) {
+          localTransportPath = "derp";
+        } else {
+          const status = await client.status({ timeoutMs: MAGICKSOCK_WEBRTC.statusTimeoutMs });
+          localTransportPath = normalizeTransportPath(status?.path);
+        }
+      } catch (_) {
+        localTransportPath = "unknown";
+      }
+      if (generation === pathProbeGeneration && session === activeSession && address === activePeerAddress) {
+        renderTransportPaths();
+        await announceTransportPath(generation, session, address).catch(() => {});
+      }
+    } finally {
+      if (generation === pathProbeGeneration && session === activeSession && address === activePeerAddress) {
+        scheduleTransportPathProbe(generation, index + 1);
+      }
+    }
+  }, delay);
+}
+
+function startTransportPathProbes({ reset = true, forceAnnounce = false } = {}) {
+  stopTransportPathProbes({ reset });
+  if (!activeSession || !activePeerAddress) return;
+  if (!persistentTransportEnabled()) {
+    // The v0.4 browser bridge has no raw UDP path. Its legacy dial API is a
+    // known DERP path, while an older peer cannot authenticate a path report.
+    localTransportPath = "derp";
+    renderTransportPaths();
+    return;
+  }
+  if (forceAnnounce) lastAnnouncedTransportPath = "";
+  const generation = pathProbeGeneration;
+  pathProbeStartedAt = Date.now();
+  renderTransportPaths();
+  scheduleTransportPathProbe(generation, 0);
+}
+
+function receiveTransportPathStatus(meta) {
+  if (!supportsAuthenticatedPathStatus()
+    || !Number.isSafeInteger(meta.revision)
+    || meta.revision <= peerPathRevision
+    || meta.revision < 1) return;
+  const path = normalizeTransportPath(meta.path);
+  if (path === "unknown" && meta.path !== "unknown") return;
+  peerPathRevision = meta.revision;
+  peerTransportPath = path;
+  renderTransportPaths();
+}
 
 function canSendHandshakeReply() {
   const cutoff = Date.now() - HANDSHAKE_REPLY_WINDOW_MS;
@@ -702,7 +979,7 @@ async function sendHandshakeReply(address, meta) {
 function localCapabilities() {
   const voiceRecordTypes = recordableVoiceTypes();
   const voicePlayTypes = playableVoiceTypes();
-  return {
+  const capabilities = {
     text: { maxBytes: APP_CONFIG.limits.textBytes },
     file: {
       protocol: "TCF1",
@@ -732,6 +1009,13 @@ function localCapabilities() {
       turn: false,
     },
   };
+  if (persistentTransportEnabled()) {
+    capabilities.transport = {
+      magicsockWebRTC: true,
+      pathStatus: MAGICKSOCK_WEBRTC.pathStatusVersion,
+    };
+  }
+  return capabilities;
 }
 
 function validCapabilities(value) {
@@ -856,6 +1140,9 @@ async function verifySessionAfterResume() {
         || pong.meta.pingId !== pingId) throw new Error("resume heartbeat rejected");
       if (session === activeSession && address === activePeerAddress) {
         noteAuthenticatedPeerTraffic();
+        // Keep revisions monotonic for the lifetime of this authenticated
+        // session. A foreground check restarts polling, not the protocol.
+        startTransportPathProbes({ reset: false, forceAnnounce: true });
         setStatus(t("background_reconnected"), "connected");
       }
       return true;
@@ -893,6 +1180,7 @@ function clearPeer() {
   cancelActiveVoiceRecording();
   stopPeerHeartbeat();
   lastAuthenticatedPeerTrafficAt = 0;
+  const previousAddress = activePeerAddress || pendingPeerAddress || pendingInboundHandshake?.replyTo || "";
   activePeerAddress = "";
   activePeerNonce = "";
   activeSession = "";
@@ -903,6 +1191,8 @@ function clearPeer() {
   pendingPeerAddress = "";
   pendingHandshakeNonce = "";
   clearPendingInboundHandshake();
+  stopTransportPathProbes();
+  closeOutboundPeerTransport(previousAddress);
   renderConnectionState();
 }
 
@@ -1015,7 +1305,13 @@ async function stopRoom({ idle = false } = {}) {
   clearTimeout(idleTimer);
   idleTimer = null;
   if (activeSession && activePeerAddress) {
-    void sendControl("SESSION_END", { reason: idle ? "IDLE" : "CLOSED" }).catch(() => {});
+    const notify = sendControl("SESSION_END", { reason: idle ? "IDLE" : "CLOSED" }).catch(() => {});
+    // A persistent Client is closed with the room. Give the already-open path
+    // one bounded opportunity to deliver SESSION_END before tearing it down.
+    await Promise.race([
+      notify,
+      new Promise((resolve) => setTimeout(resolve, 1_000)),
+    ]);
   }
   cancelVoiceNote();
   endLiveLink(false);
@@ -1047,6 +1343,7 @@ function setPeerConnected(address, session, capabilities, nonce = "") {
   pendingPeerAddress = "";
   pendingHandshakeNonce = "";
   startPeerHeartbeat();
+  startTransportPathProbes();
   markActivity();
   renderConnectionState();
 }
@@ -1106,13 +1403,13 @@ function cancelRemoteHandshake(waiter) {
   // If the remote accepted CONFIRM just before this page stopped or timed out,
   // release that candidate/session too. This is best effort because the relay
   // path itself may be the reason the handshake failed.
-  void sendControlTo(confirm.address, {
+  void sendLegacyChatEnvelopeTo(confirm.address, {
     type: "HELLO_CANCEL",
     v: APP_CONFIG.protocolVersion,
     replyTo: confirm.replyTo,
     nonce: confirm.nonce,
     session: confirm.session,
-  }).catch(() => {});
+  }, new Uint8Array(), APP_CONFIG.ports.control, HANDSHAKE_CANCEL_TIMEOUT_MS).catch(() => {});
 }
 
 function settleHandshake(error = null) {
@@ -1185,6 +1482,7 @@ async function connectToPeer(address) {
     pendingPeerAddress = "";
     pendingHandshakeNonce = "";
     settleHandshake(error);
+    closeOutboundPeerTransport(normalized);
     setStatus(format("status_failed", { message: redact(error.message) }), "error");
     recordError(error);
     return false;
@@ -1255,6 +1553,11 @@ async function receiveControl(connection) {
       return;
     }
     if (!hasSession(meta)) throw new Error("control session rejected");
+    if (meta.type === "PATH_STATUS") {
+      receiveTransportPathStatus(meta);
+      noteAuthenticatedPeerTraffic();
+      return;
+    }
     if (meta.type === "SESSION_PING") {
       if (typeof meta.pingId !== "string" || meta.pingId.length !== 32) throw new Error("invalid heartbeat");
       await connection.write(packChatEnvelope(sessionMeta("SESSION_PONG", { pingId: meta.pingId })));
@@ -1343,10 +1646,14 @@ async function receiveHello(meta) {
   }
 }
 
-function clearPendingInboundHandshake(candidate = null) {
+function clearPendingInboundHandshake(candidate = null, { preserveTransport = false } = {}) {
   if (!pendingInboundHandshake || (candidate && pendingInboundHandshake !== candidate)) return;
+  const address = pendingInboundHandshake.replyTo;
   clearTimeout(pendingInboundHandshake.timer);
   pendingInboundHandshake = null;
+  if (!preserveTransport && !activeSession && !pendingPeerAddress) {
+    closeOutboundPeerTransport(address);
+  }
 }
 
 function receiveHelloConfirm(meta) {
@@ -1369,7 +1676,7 @@ function receiveHelloConfirm(meta) {
     || meta.replyTo !== candidate.replyTo
     || meta.nonce !== candidate.nonce
     || meta.session !== candidate.session) return;
-  clearPendingInboundHandshake(candidate);
+  clearPendingInboundHandshake(candidate, { preserveTransport: true });
   setPeerConnected(candidate.replyTo, candidate.session, candidate.capabilities, candidate.nonce);
   addMessage({ type: "system", text: t("system_joined") });
 }
@@ -1760,11 +2067,7 @@ async function sendFileTransfer(entry) {
   tcTest.sentSha256 = null;
   await wakeLocks.acquire("file-transfer");
   try {
-    connection = await tailcatDial({
-      addr: address,
-      derpMapURL: APP_CONFIG.derpMapURL,
-      port: APP_CONFIG.ports.file,
-    });
+    connection = await dialPeerStream(address, APP_CONFIG.ports.file);
     entry.connection = connection;
     if (entry.cancelled) throw new Error(t("file_cancelled"));
     const reader = new ConnectionReader(connection, FILE_DECISION_TIMEOUT_MS + 10_000);
@@ -3023,6 +3326,8 @@ $("media-expand").addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  stopTransportPathProbes();
+  closeOutboundPeerTransport();
   listener?.close();
   activeFileTransfer?.connection?.close();
   activeFileTransfer?.entry?.connection?.close();
@@ -3031,16 +3336,26 @@ window.addEventListener("beforeunload", () => {
 });
 
 subscribePageLifecycle({
-  hidden: notePageBackgrounded,
-  freeze: notePageBackgrounded,
+  hidden: () => {
+    notePageBackgrounded();
+    stopTransportPathProbes({ reset: false });
+  },
+  freeze: () => {
+    notePageBackgrounded();
+    stopTransportPathProbes({ reset: false });
+  },
   visible: resumeForegroundSession,
   resume: resumeForegroundSession,
   pagehide: ({ persisted }) => {
     notePageBackgrounded();
     if (!persisted) {
+      stopTransportPathProbes();
+      closeOutboundPeerTransport();
       listener?.close();
       activeFileTransfer?.connection?.close();
       activeFileTransfer?.entry?.connection?.close();
+    } else {
+      stopTransportPathProbes({ reset: false });
     }
   },
   pageshow: resumeForegroundSession,
@@ -3088,6 +3403,41 @@ async function startWasm() {
   const { instance } = await WebAssembly.instantiateStreaming(await fetchWasm(), go.importObject);
   go.run(instance).catch(recordError);
   await ready;
+}
+
+async function configureDataTransport() {
+  const enabled = MAGICKSOCK_WEBRTC.enabled;
+  const configure = globalThis.tailcatConfigureTransport;
+  if (typeof configure !== "function") {
+    if (enabled) throw new Error("this WASM build does not expose WebRTC transport configuration");
+    tcTest.runtime.magicsockWebRTC = false;
+    return;
+  }
+  const stunURLs = APP_CONFIG.rtc.iceServers.flatMap(({ urls }) => (
+    Array.isArray(urls) ? urls : [urls]
+  )).filter((url) => typeof url === "string" && url.startsWith("stun:"));
+  if (enabled && stunURLs.length === 0) throw new Error("WebRTC data transport requires an explicit STUN URL");
+  const applied = await configure({
+    webRTC: {
+      enabled,
+      stunURLs,
+    },
+  });
+  if (enabled && (applied?.webRTC?.compiled !== true || applied.webRTC.enabled !== true)) {
+    throw new Error("the WASM build did not enable the requested WebRTC transport");
+  }
+  if (enabled && typeof globalThis.AbortController !== "function") {
+    throw new Error("this browser cannot cancel persistent Tailcat clients");
+  }
+  if (enabled && typeof globalThis.tailcatConnect !== "function") {
+    throw new Error("this WASM build does not expose persistent Tailcat clients");
+  }
+  tcTest.runtime.magicsockWebRTC = enabled;
+  tcTest.runtime.transportConfiguration = {
+    compiled: applied?.webRTC?.compiled === true,
+    enabled: applied?.webRTC?.enabled === true,
+    stunURLs: Array.isArray(applied?.webRTC?.stunURLs) ? [...applied.webRTC.stunURLs] : [],
+  };
 }
 
 async function protocolSelfTest() {
@@ -3164,6 +3514,7 @@ async function bootstrap() {
     return;
   }
   await startWasm();
+  await configureDataTransport();
   tcTest.ready = true;
   tcTest.state.transport = "ready";
   $("app").setAttribute("aria-busy", "false");

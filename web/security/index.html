@@ -25,11 +25,11 @@
     <h1>安全说明 / Security notes</h1>
     <p class="lede">加密保护传输中的内容；它不验证对方身份，也不能保护已被控制的终端或危险文件。请在使用前了解边界。</p>
     <p class="lede" lang="en">Encryption protects content in transit. It does not authenticate the person on the other end or protect a compromised endpoint or a dangerous file. Understand the boundary before use.</p>
-    <p class="updated">更新日期 / Updated: 2026-09-01</p>
+    <p class="updated">更新日期 / Updated: 2026-09-02</p>
 
     <div class="facts" aria-label="Security facts">
       <div class="fact"><strong>WireGuard E2EE</strong><span>文字、文件、语音留言和通话信令。</span></div>
-      <div class="fact"><strong>WebRTC DTLS-SRTP</strong><span>实时语音、视频与屏幕媒体。</span></div>
+      <div class="fact"><strong>WebRTC 实验 / Lab</strong><span>数据可能直连；实时媒体使用 DTLS-SRTP。</span></div>
       <div class="fact"><strong>DERP 元数据 / Metadata</strong><span>中继可见 IP、时间、区域和流量模式。</span></div>
       <div class="fact"><strong>不扫描 / No scanning</strong><span>内容不经过病毒或恶意软件检查。</span></div>
     </div>
@@ -72,7 +72,7 @@
         </ol>
 
         <h2>4. 网络与可用性</h2>
-        <p>浏览器 Tailcat 当前经公共 DERP 中继传输，公开节点限速、尽力而为、无可用性或吞吐量 SLA。实时通话只配置 STUN，不配置 TURN；在对称 NAT、防火墙或企业网络下可能失败。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。本测试版没有后台传输或断点续传；返回前台后会检查会话，失效时必须重新连接。</p>
+        <p>WebRTC 数据路径实验先经公共 DERP 建连并交换路径信息，然后尝试在浏览器间直传仍受 WireGuard 保护的数据包；失败时继续或回退到 DERP。路径标签同时显示本机检测结果和对方在当前会话中的认证报告，只有双方均报告 WebRTC 时才显示双方直连，且路径仍可能随网络变化。公开 DERP 限速、尽力而为、无可用性或吞吐量 SLA。数据直连和实时通话均只配置 STUN、不配置 TURN；在对称 NAT、防火墙或企业网络下可能无法直连。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。本测试版没有后台传输或断点续传。</p>
 
         <h2>5. 浏览器与本地密钥</h2>
         <p>正式支持桌面 Chrome 和 Edge；Android Chrome 132+ 与 iOS Safari 17+ 为测试支持并应保持前台。iOS Chrome、Android Edge、Samsung Internet、Firefox、桌面 Safari 和其他浏览器不属于本版正式目标；若核心能力完整，应用可能提供明确标记的受限模式，但不作兼容性承诺。临时密钥在页面关闭或超时后停止使用；主动保存的地址私钥只应进入本站来源的 IndexedDB，并可由用户忘记或通过清除站点数据删除。存储不可用时应用必须退回临时地址。</p>
@@ -119,7 +119,7 @@
         </ol>
 
         <h2>4. Network and availability</h2>
-        <p>Browser Tailcat traffic currently uses public DERP relays, which are rate-limited, best-effort, and have no uptime or throughput SLA. Live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent a call. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer. This beta has no background transfer or resume; it checks the session on return and requires reconnection after loss.</p>
+        <p>The WebRTC data-path experiment starts through public DERP and exchanges path information before trying to carry WireGuard-protected packets directly between browsers; it stays on or falls back to DERP on failure. Path labels show both the local observation and an authenticated report from the current peer, and claim bilateral WebRTC only when both agree; paths can still change with the network. Public DERP is rate-limited, best-effort, and has no uptime or throughput SLA. Data paths and live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent direct connectivity. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer. This beta has no background transfer or resume.</p>
 
         <h2>5. Browsers and local keys</h2>
         <p>Desktop Chrome and Edge are supported; Android Chrome 132+ and iOS Safari 17+ are foreground-only beta targets. iOS Chrome, Android Edge, Samsung Internet, Firefox, desktop Safari, and other browsers are not release targets. When their core capabilities are complete, the app may offer an explicitly limited mode without a compatibility commitment. Ephemeral keys stop being used when the page closes or times out. A deliberately remembered address key should exist only in this origin's IndexedDB and can be removed with “forget address” or by clearing site data; when storage is unavailable, the app must fall back to an ephemeral address.</p>

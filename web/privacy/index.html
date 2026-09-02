@@ -25,7 +25,7 @@
     <h1>隐私说明 / Privacy notice</h1>
     <p class="lede">我们尽量不收集数据，但“端到端加密”不等于没有网络元数据。本页说明浏览器、Cloudflare、Tailcat DERP 与 WebRTC 各自会处理什么。</p>
     <p class="lede" lang="en">We try to collect as little data as possible, but end-to-end encryption does not eliminate network metadata. This notice explains what the browser, Cloudflare, Tailcat DERP, and WebRTC each process.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-01</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-02</p>
 
     <div class="facts" aria-label="Key privacy facts">
       <div class="fact"><strong>无账号 / No accounts</strong><span>无需注册、登录或提供用户资料。</span></div>
@@ -35,7 +35,7 @@
     </div>
 
     <div class="notice warning">
-      <p><strong>重要：</strong>文件、文字和语音留言内容通过 WireGuard 端到端加密，但公共 DERP 中继仍能看到连接 IP、时间、所选区域和大致流量。实时 WebRTC 的通信对端和 STUN 服务也可能看到你的公网 IP。</p>
+      <p><strong>重要：</strong>文件、文字和语音留言内容通过 WireGuard 端到端加密。WebRTC 数据直连实验仍以 DERP 启动和兜底；DERP 可观察中继期间的连接元数据，直连对端和 STUN 服务可能看到你的公网 IP。</p>
     </div>
 
     <div class="language-grid">
@@ -54,7 +54,8 @@
         <p>邀请信息放在 URL 的 <code>#fragment</code> 中。片段不会随常规 HTTP 请求发送给 Cloudflare Pages；应用会在读取邀请后从地址栏移除片段。但它在被移除前仍可能出现在浏览器历史、剪贴板、浏览器扩展、同步功能、截图或屏幕共享中。</p>
 
         <h2>4. Tailcat 传输</h2>
-        <p>文字、文件、语音留言以及通话信令通过 Tailcat 连接传输，并由 WireGuard 在通信双方之间端到端加密。浏览器版目前使用 Tailcat DERP 中继；中继无法读取加密内容，但会处理或观察双方 IP、连接时间、DERP 区域、数据量与流量模式等元数据。</p>
+        <p>文字、文件、语音留言以及通话信令通过 Tailcat 连接传输，并由 WireGuard 在通信双方之间端到端加密。实验版本先通过 Tailcat DERP 建立连接，再尝试把 WireGuard 数据包升级到浏览器 WebRTC 数据直连；无法直连或直连失效时继续或回退到 DERP。中继无法读取加密内容，但会处理或观察中继期间的双方 IP、连接时间、DERP 区域、数据量与流量模式等元数据。WebRTC 直连时，通信对端、STUN 服务和相关网络运营方可能看到你的公网 IP 与连接候选。</p>
+        <p>页面显示本机检测到的路径和对方通过当前加密会话报告的路径。路径可能变化，报告用于测试诊断，不是匿名性、安全性或传输成功保证。</p>
         <p>公共 Tailcat DERP 是限速、尽力而为且无可用性 SLA 的测试基础设施。中继运营方可能依其自身政策保存运行与滥用防护日志。请勿把“内容加密”理解为匿名服务。</p>
 
         <h2>5. 实时语音、视频和屏幕共享</h2>
@@ -91,7 +92,8 @@
         <p>Invitation data is placed in the URL <code>#fragment</code>. A fragment is not sent in an ordinary HTTP request to Cloudflare Pages, and the app removes it from the address bar after reading it. Before removal, it may still be exposed through browser history, the clipboard, extensions, sync features, screenshots, or screen sharing.</p>
 
         <h2>4. Tailcat transfers</h2>
-        <p>Text, files, voice notes, and call signaling travel over Tailcat connections and are end-to-end encrypted between peers with WireGuard. Browser connections currently use Tailcat DERP relays. A relay cannot read encrypted content, but it processes or observes metadata such as peer IP addresses, connection time, DERP region, transfer volume, and traffic patterns.</p>
+        <p>Text, files, voice notes, and call signaling travel over Tailcat connections and are end-to-end encrypted between peers with WireGuard. The experimental build starts through Tailcat DERP, then tries to upgrade WireGuard packets to a browser WebRTC data path; it remains on or falls back to DERP when direct connectivity is unavailable or fails. A relay cannot read encrypted content, but while relaying it processes or observes metadata such as peer IP addresses, connection time, DERP region, transfer volume, and traffic patterns. On a WebRTC direct path, your peer, the STUN service, and relevant network operators may see your public IP address and connection candidates.</p>
+        <p>The page displays the locally detected path and a path reported by the peer through the current encrypted session. Paths can change, and these reports are laboratory diagnostics rather than guarantees of anonymity, security, or delivery.</p>
         <p>Public Tailcat DERP relays are rate-limited, best-effort beta infrastructure with no uptime SLA. Relay operators may retain operational and abuse-prevention logs under their own policies. Content encryption does not make this an anonymity service.</p>
 
         <h2>5. Live audio, video, and screen sharing</h2>
