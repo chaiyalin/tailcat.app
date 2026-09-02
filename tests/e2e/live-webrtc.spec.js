@@ -24,7 +24,6 @@ async function readPinnedForkSHA() {
   const candidates = [
     resolve("WEBRTC_FORK.lock"),
     join(artifactRoot, "WEBRTC_FORK.lock"),
-    join(artifactRoot, "build-evidence", "go-version-m-dist-webrtc.txt"),
     join(artifactRoot, "build-evidence", "go-modules.txt"),
   ];
   for (const candidate of candidates) {
