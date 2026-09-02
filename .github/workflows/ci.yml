@@ -321,7 +321,12 @@ jobs:
           for artifact in "${evidence_artifacts[@]}"; do
             wasm_check="$RUNNER_TEMP/$(basename "$artifact")-version.wasm"
             gzip -dc "$artifact/main.wasm.gz" > "$wasm_check"
-            go version -m "$wasm_check" > "build-evidence/go-version-m-$(basename "$artifact").txt"
+            # `go version -m` does not recognize WebAssembly executables. The
+            # Go build ID is supported for WASM and, together with the module
+            # graph and checksums above, provides reproducible provenance.
+            build_id="$(go tool buildid "$wasm_check")"
+            test -n "$build_id"
+            printf '%s\n' "$build_id" > "build-evidence/go-buildid-$(basename "$artifact").txt"
             rm -- "$wasm_check"
           done
           printf 'ordinary and experimental mode rebuilds were byte-for-byte identical\n' > build-evidence/reproducibility.txt
