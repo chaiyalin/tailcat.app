@@ -42,6 +42,12 @@ type initializingSessionClient interface {
 	Ping(context.Context) (tailcat.PingResult, error)
 }
 
+type sessionDiagnostics interface {
+	recordPath(string)
+	snapshot() js.Value
+	close()
+}
+
 type clientOptions struct {
 	addr        string
 	derpMapURL  string
@@ -223,6 +229,7 @@ func newJSSession(client sessionClient) js.Value {
 		client:      client,
 		connections: make(map[uint64]func()),
 	}
+	diagnostics := newSessionDiagnostics()
 	object := js.Global().Get("Object").New()
 	promise := js.Global().Get("Promise")
 	closedDial := promise.Get("reject").Call(
@@ -238,10 +245,11 @@ func newJSSession(client sessionClient) js.Value {
 	closedClose := js.Global().Get("Boolean")
 
 	var (
-		dialFunc   js.Func
-		statusFunc js.Func
-		closeFunc  js.Func
-		release    sync.Once
+		dialFunc        js.Func
+		statusFunc      js.Func
+		closeFunc       js.Func
+		diagnosticsFunc js.Func
+		release         sync.Once
 	)
 	dialFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
 		port, err := requiredSessionPort(args)
@@ -295,14 +303,29 @@ func newJSSession(client sessionClient) js.Value {
 			defer cancel()
 			result, err := client.DiscoPing(ctx)
 			if err != nil {
+				if diagnostics != nil {
+					diagnostics.recordPath("unknown")
+				}
 				return nil, fmt.Errorf("DiscoPing: %w", err)
 			}
 			if result == nil {
+				if diagnostics != nil {
+					diagnostics.recordPath("unknown")
+				}
 				return nil, errors.New("DiscoPing returned no result")
 			}
-			return sessionStatus(result), nil
+			status := sessionStatus(result)
+			if diagnostics != nil {
+				diagnostics.recordPath(status["path"].(string))
+			}
+			return status, nil
 		})
 	})
+	if diagnostics != nil {
+		diagnosticsFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
+			return diagnostics.snapshot()
+		})
+	}
 	closeFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
 		s.close()
 		release.Do(func() {
@@ -312,6 +335,12 @@ func newJSSession(client sessionClient) js.Value {
 			object.Set("dial", closedDial)
 			object.Set("status", closedStatus)
 			object.Set("close", closedClose)
+			if diagnostics != nil {
+				diagnostics.close()
+				js.Global().Get("Reflect").Call("deleteProperty", object, "diagnostics")
+				diagnosticsFunc.Release()
+				diagnosticsFunc = js.Func{}
+			}
 			dialFunc.Release()
 			statusFunc.Release()
 			closeFunc.Release()
@@ -325,6 +354,9 @@ func newJSSession(client sessionClient) js.Value {
 	object.Set("dial", dialFunc)
 	object.Set("status", statusFunc)
 	object.Set("close", closeFunc)
+	if diagnostics != nil {
+		object.Set("diagnostics", diagnosticsFunc)
+	}
 	return object
 }
 
