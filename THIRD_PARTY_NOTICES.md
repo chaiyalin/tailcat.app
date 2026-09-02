@@ -4,12 +4,16 @@ This file records the open-source components used by the browser build of
 tailcat.app. It is informational and does not replace the license terms that
 apply to each component.
 
-The inventory was generated on 2026-09-01 from the pinned module graph with
-Go 1.27.0:
+The inventory was generated on 2026-09-02 from the pinned ordinary and
+`tailcat_webrtc_experiment` module graphs with Go 1.27.0:
 
 ```sh
-GOOS=js GOARCH=wasm go list -deps \
-  -f '{{if and .Module (ne .Module.Path "tailcatchat")}}{{.Module.Path}} {{.Module.Version}}{{end}}' . \
+GOWORK=off GOOS=js GOARCH=wasm go list -mod=readonly -deps \
+  -f '{{if and .Module (ne .Module.Path "tailcatchat")}}{{.Module.Path}} {{.Module.Version}}{{with .Module.Replace}} => {{.Path}} {{.Version}}{{end}}{{end}}' . \
+  | sort -u
+
+GOWORK=off GOOS=js GOARCH=wasm go list -mod=readonly -tags=tailcat_webrtc_experiment -deps \
+  -f '{{if and .Module (ne .Module.Path "tailcatchat")}}{{.Module.Path}} {{.Module.Version}}{{with .Module.Replace}} => {{.Path}} {{.Version}}{{end}}{{end}}' . \
   | sort -u
 ```
 
@@ -17,7 +21,8 @@ Only modules containing packages in that `js/wasm` dependency graph are
 listed. Versions that appear in `go.mod` but contribute no package to this
 target are intentionally omitted. The Go runtime and standard library, which
 are linked into the WebAssembly binary, and the vendored browser QR library
-are listed separately.
+are listed separately. The Pion modules, `github.com/google/uuid`, and
+`github.com/wlynxg/anet` are linked only by the opt-in experimental build.
 
 ## Upstream application and transport
 
@@ -81,7 +86,8 @@ supports, certifies, or endorses tailcat.app.
 Each entry below names the exact selected version, its license family, the
 notice found in its root license or authors file (where present), and an
 immutable upstream copy of the complete license. The SHA-256 values were
-calculated from the corresponding `LICENSE` file in the Go module cache.
+calculated from the corresponding root license file (`LICENSE` or
+`LICENSE.txt`) in the Go module cache.
 None of the Apache-2.0 modules listed below shipped a root `NOTICE` file in the
 selected module version.
 
@@ -92,12 +98,14 @@ selected module version.
 | `filippo.io/edwards25519 v1.2.0` | Copyright (c) 2009 The Go Authors. All rights reserved. | [LICENSE](https://github.com/FiloSottile/edwards25519/blob/v1.2.0/LICENSE) | `2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067` |
 | `github.com/creachadair/msync v0.8.1` | Copyright (C) 2022, Michael J. Fromberger; All Rights Reserved. | [LICENSE](https://github.com/creachadair/msync/blob/v0.8.1/LICENSE) | `1d45f7789b678c742a045d7a6923c2762f667dc2523b9b4c01fe240d24c83083` |
 | `github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68` | Copyright (c) 2020 The Go Authors. All rights reserved. | [LICENSE](https://github.com/go-json-experiment/json/blob/01eb4420fa68/LICENSE) | `14a34c4db2d21bf9cf80d028b802cd22fed9bf597a6c2db7ce30ee6ffd04967a` |
+| `github.com/google/uuid v1.6.0` | Copyright (c) 2009,2014 Google Inc. All rights reserved. | [LICENSE](https://github.com/google/uuid/blob/v1.6.0/LICENSE) | `0a8d61ed3cbfd5312326e8126c31ce9c627a283adc99131b56896d29ada04b2d` |
 | `github.com/hdevalence/ed25519consensus v0.2.0` | Copyright (c) 2009 The Go Authors. All rights reserved; Copyright (c) 2020 Henry de Valence. All rights reserved. | [LICENSE](https://github.com/hdevalence/ed25519consensus/blob/v0.2.0/LICENSE) | `789be8b214a1871d8d1a5ab157f8f4ad74cd889087762bd5cced07ed589b6bc7` |
 | `github.com/klauspost/compress v1.19.1` | Copyright (c) 2012 The Go Authors. All rights reserved; Copyright (c) 2019 Klaus Post. All rights reserved. | [LICENSE](https://github.com/klauspost/compress/blob/v1.19.1/LICENSE) | `0d9e582ee4bff57bf1189c9e514e6da7ce277f9cd3bc2d488b22fbb39a6d87cf` |
 | `github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd` | Copyright (c) 2019 Tailscale Inc. All rights reserved. | [LICENSE](https://github.com/tailscale/hujson/blob/ecc657c15afd/LICENSE) | `a125b6c2721809b6c2a8761771932611833008ed8697d752b3e35d36e4bbd83e` |
 | `github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc` | Copyright (c) 2021, Tailscale Inc. All rights reserved; AUTHORS: Tailscale Inc. | [LICENSE](https://github.com/tailscale/peercred/blob/35a0c7bd7edc/LICENSE) | `8e0db394107481655ef6a46baace86aaead5fc9b4c5ce83b9fa16037e891d03c` |
 | `github.com/tailscale/tailcat v0.4.0` | Copyright (c) 2020 Tailscale Inc & contributors. | [LICENSE](https://github.com/tailscale/tailcat/blob/v0.4.0/LICENSE) | `a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b` |
 | `github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976` | Copyright (c) 2020 Tailscale Inc & AUTHORS. | [LICENSE](https://github.com/tailscale/web-client-prebuilt/blob/d4cd19a26976/LICENSE) | `d1ee1c7947d4b2c1963ea214d5324f1d4c89f2f1d0f0224889b4dfb868dad725` |
+| `github.com/wlynxg/anet v0.0.5` | Copyright (c) 2023, wlynxg | [LICENSE](https://github.com/wlynxg/anet/blob/v0.0.5/LICENSE) | `6b8970dbe36fe214fd02b438c06daee19897708e435d761ecd18adc9ef7e7a05` |
 | `go4.org/netipx v0.0.0-20260823151212-3075585bcbeb` | Copyright (c) 2020 The Inet.af AUTHORS. All rights reserved. AUTHORS includes Alex Willmer, Matt Layher, Tailscale Inc., and Tobias Klauser. | [LICENSE](https://github.com/go4org/netipx/blob/3075585bcbeb/LICENSE) | `1bfc4f32f4ec8ca8fce54bd2d97784f003786753a69a78ca74ffae1574037fb9` |
 | `golang.org/x/crypto v0.55.0` | Copyright 2009 The Go Authors. | [LICENSE](https://github.com/golang/crypto/blob/v0.55.0/LICENSE) | `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad` |
 | `golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f` | Copyright 2009 The Go Authors. | [LICENSE](https://github.com/golang/exp/blob/746e56fc9e2f/LICENSE) | `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad` |
@@ -107,13 +115,14 @@ selected module version.
 | `golang.org/x/term v0.45.0` | Copyright 2009 The Go Authors. | [LICENSE](https://github.com/golang/term/blob/v0.45.0/LICENSE) | `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad` |
 | `golang.org/x/text v0.41.0` | Copyright 2009 The Go Authors. | [LICENSE](https://github.com/golang/text/blob/v0.41.0/LICENSE) | `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad` |
 | `golang.org/x/time v0.15.0` | Copyright 2009 The Go Authors. | [LICENSE](https://github.com/golang/time/blob/v0.15.0/LICENSE) | `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad` |
-| `tailscale.com v1.103.0-pre.0.20260830144538-72780705eda8` | Copyright (c) 2020 Tailscale Inc & contributors. | [LICENSE](https://github.com/tailscale/tailscale/blob/72780705eda8/LICENSE) | `6c10979d9859262305f3a9971502aca4a20d9531f71ad2fc5cf66c258d21fd1e` |
+| `tailscale.com v1.103.0-pre.0.20260830144538-72780705eda8` → `github.com/chaiyalin/tailscale v0.0.0-20260902082517-7d20ed5680aa` | Copyright (c) 2020 Tailscale Inc & contributors. | [LICENSE](https://github.com/chaiyalin/tailscale/blob/7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7/LICENSE) | `a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b` |
 
 The `golang.org/x/*` modules also carry the Go project's
 [`PATENTS`](https://github.com/golang/go/blob/go1.27.0/PATENTS) additional IP
 rights grant. The selected `tailscale.com` module carries Tailscale's
-[`PATENTS`](https://github.com/tailscale/tailscale/blob/72780705eda8/PATENTS)
-additional IP rights grant.
+[`PATENTS`](https://github.com/chaiyalin/tailscale/blob/7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7/PATENTS)
+additional IP rights grant (SHA-256
+`debc5ca73d082a6c7de743fecdba6f75deafdf9200acfbddeb8ca32d66e6e128`).
 
 ### MIT-family modules
 
@@ -121,6 +130,21 @@ additional IP rights grant.
 |---|---|---|---|
 | `github.com/fxamacker/cbor/v2 v2.9.0` | Copyright (c) 2019-present Faye Amacker | [LICENSE](https://github.com/fxamacker/cbor/blob/v2.9.0/LICENSE) | `78cad457d5ea7318230f3d969d4cdf29cef45524a1fc8ca3a97646da1ad7a841` |
 | `github.com/gaissmai/bart v0.26.1` | Copyright (c) 2024 Karl Gaissmaier | [LICENSE](https://github.com/gaissmai/bart/blob/v0.26.1/LICENSE) | `12d27746d111da33969df0ecaa9b799e22c42db7d0b6a5164f383ec934233a41` |
+| `github.com/pion/datachannel v1.6.2` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/datachannel/blob/v1.6.2/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/dtls/v3 v3.1.5` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/dtls/blob/v3.1.5/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/ice/v4 v4.4.0` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/ice/blob/v4.4.0/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/interceptor v0.1.47` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/interceptor/blob/v0.1.47/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/logging v0.2.4` | Copyright (c) 2023 The Pion community | [LICENSE](https://github.com/pion/logging/blob/v0.2.4/LICENSE) | `87272dba8c4fcf57101a3195f4f53f7b010b6e153b9b0977bb1a3f91acddf691` |
+| `github.com/pion/mdns/v2 v2.1.0` | Copyright (c) 2018 | [LICENSE](https://github.com/pion/mdns/blob/v2.1.0/LICENSE) | `83e4dd21429a91fb7cea67a476032a9641425e5355df2e0f589a738b6ec9fd2c` |
+| `github.com/pion/randutil v0.1.0` | Copyright (c) 2020 Pion | [LICENSE](https://github.com/pion/randutil/blob/v0.1.0/LICENSE) | `badaf9bc72e71d5a70e7604c636b5b7adf79b9cafc188688438105d2b1e54722` |
+| `github.com/pion/rtcp v1.2.17` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/rtcp/blob/v1.2.17/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/rtp v1.10.5` | Upstream license retains the placeholder notice “Copyright (c) &lt;year&gt; &lt;copyright holders&gt;”. | [LICENSE](https://github.com/pion/rtp/blob/v1.10.5/LICENSE) | `b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0` |
+| `github.com/pion/sctp v1.11.1` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/sctp/blob/v1.11.1/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/sdp/v3 v3.0.19` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/sdp/blob/v3.0.19/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/stun/v3 v3.1.6` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/stun/blob/v3.1.6/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/transport/v4 v4.0.2` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/transport/blob/v4.0.2/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/turn/v5 v5.0.12` | Copyright (c) 2026 The Pion community. This library is linked transitively; tailcat.app does not configure a TURN service. | [LICENSE](https://github.com/pion/turn/blob/v5.0.12/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
+| `github.com/pion/webrtc/v4 v4.2.18` | Copyright (c) 2026 The Pion community | [LICENSE](https://github.com/pion/webrtc/blob/v4.2.18/LICENSE) | `6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f` |
 | `github.com/tailscale/wireguard-go v0.0.0-20260821191448-23d18d66172c` | Imported source headers state Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved. | [LICENSE](https://github.com/tailscale/wireguard-go/blob/23d18d66172c/LICENSE) | `91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195` |
 | `github.com/x448/float16 v0.8.4` | Copyright (c) 2019 Montgomery Edwards⁴⁴⁸ and Faye Amacker | [LICENSE](https://github.com/x448/float16/blob/v0.8.4/LICENSE) | `a555f1194fdac34da70fb416968f7e2217b02352c26c1eac2fa45fcb4290ae8d` |
 

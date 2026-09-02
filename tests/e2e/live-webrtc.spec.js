@@ -15,11 +15,10 @@ const bilateralWebRTC = Object.freeze([
   Object.freeze({ local: "webrtc", peer: "webrtc", bilateral: "webrtc" }),
 ]);
 const commitSHA = /^[0-9a-f]{40}$/u;
-const shortOrFullCommitSHA = /^[0-9a-f]{12}(?:[0-9a-f]{28})?$/u;
 
 async function readPinnedForkSHA() {
   const explicit = String(process.env.WEBRTC_FORK_SHA || "").trim().toLowerCase();
-  if (shortOrFullCommitSHA.test(explicit)) return explicit;
+  if (commitSHA.test(explicit)) return explicit;
 
   const artifactRoot = dirname(resolve(process.env.E2E_DIST_DIR || "dist"));
   const candidates = [
@@ -40,12 +39,8 @@ async function readPinnedForkSHA() {
       /(?:webrtc[_ -]?fork|fork[_ -]?(?:commit|sha))[^\r\n0-9a-f]{0,80}([0-9a-f]{40})\b/iu,
     );
     if (labelled) return labelled[1].toLowerCase();
-    const pseudoVersion = text.match(
-      /github\.com\/chaiyalin\/tailscale(?:\s+|@)v[^\s]*-([0-9a-f]{12})\b/iu,
-    );
-    if (pseudoVersion) return pseudoVersion[1].toLowerCase();
   }
-  throw new Error("pinned WebRTC fork commit evidence is unavailable");
+  throw new Error("the complete 40-character WebRTC fork commit evidence is unavailable");
 }
 
 async function assertExperimentalRuntime(page) {

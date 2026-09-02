@@ -25,7 +25,7 @@
     <h1>开源许可 / Open-source licenses</h1>
     <p class="lede">tailcat.app 保留 Tailcatchat 与 Tailcat 的 BSD-3-Clause 许可、版权声明和上游归属。第三方名称仅用于说明来源。</p>
     <p class="lede" lang="en">tailcat.app preserves the BSD-3-Clause licenses, copyright notices, and upstream attribution for Tailcatchat and Tailcat. Third-party names identify their sources only.</p>
-    <p class="updated">更新日期 / Updated: 2026-09-01</p>
+    <p class="updated">更新日期 / Updated: 2026-09-02</p>
 
     <div class="notice">
       <p>本项目是非官方项目，与 Tailscale Inc. 无关联，也未获得其背书。This is an unofficial project and is not affiliated with or endorsed by Tailscale Inc.</p>
@@ -46,7 +46,7 @@
         <p>使用 Tailcat 开源代码不代表 Tailscale 对本站的关联、认证、支持或背书。</p>
 
         <h2>3. 其他依赖</h2>
-        <p>下方清单来自 <code>GOOS=js GOARCH=wasm go list -deps</code> 的实际构建依赖图。每项都提供固定版本、归属、许可证类型和准确许可证链接；完整审计记录见本站分发的 <a href="/THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a>。不同依赖分别采用 BSD、MIT、ISC 或 Apache-2.0，并非统一采用 Tailcat 的许可证。</p>
+        <p>下方清单来自普通构建与 <code>tailcat_webrtc_experiment</code> 构建的实际 <code>GOOS=js GOARCH=wasm go list -deps</code> 依赖图并集。每项都提供固定版本、归属、许可证类型和准确许可证链接；完整审计记录见本站分发的 <a href="/THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a>。不同依赖分别采用 BSD、MIT、ISC 或 Apache-2.0，并非统一采用 Tailcat 的许可证。</p>
 
         <h3>本地二维码依赖：uqr</h3>
         <p>邀请二维码在浏览器本地使用 <a href="https://github.com/unjs/uqr">uqr v0.1.3</a> 生成，不调用第三方二维码服务。仓库分发 <code>web/vendor/uqr.js</code> 与 <code>web/vendor/uqr.LICENSE.txt</code>。uqr 采用 MIT License；vendored 文件声明 Copyright (c) Sébastien Chopin, Pooya Parsa, Anthony Fu and contributors，许可文件同时保留 Project Nayuki 与 Anthony Fu 的版权声明。</p>
@@ -69,7 +69,7 @@
         <p>Use of open-source Tailcat code does not imply affiliation, certification, support, or endorsement by Tailscale.</p>
 
         <h2>3. Other dependencies</h2>
-        <p>The inventory below comes from the actual <code>GOOS=js GOARCH=wasm go list -deps</code> build graph. Every entry provides its pinned version, attribution, license family, and exact license source; the complete audit record is distributed locally as <a href="/THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a>. Dependencies use BSD, MIT, ISC, or Apache-2.0 terms as listed, not one common Tailcat license.</p>
+        <p>The inventory below comes from the actual ordinary and <code>tailcat_webrtc_experiment</code> <code>GOOS=js GOARCH=wasm go list -deps</code> build graphs. Every entry provides its pinned version, attribution, license family, and exact license source; the complete audit record is distributed locally as <a href="/THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a>. Dependencies use BSD, MIT, ISC, or Apache-2.0 terms as listed, not one common Tailcat license.</p>
 
         <h3>Local QR dependency: uqr</h3>
         <p>Invitation QR codes are generated entirely in the browser with <a href="https://github.com/unjs/uqr">uqr v0.1.3</a>; no third-party QR service is called. The repository distributes <code>web/vendor/uqr.js</code> and <code>web/vendor/uqr.LICENSE.txt</code>. uqr uses the MIT License. The vendored file declares Copyright (c) Sébastien Chopin, Pooya Parsa, Anthony Fu and contributors; its license file also preserves the Project Nayuki and Anthony Fu copyright notices.</p>
@@ -81,7 +81,7 @@
 
     <section aria-labelledby="wasm-dependencies">
       <h2 id="wasm-dependencies">WASM 第三方依赖清单 / WASM third-party inventory</h2>
-      <p>审计目标 / Audit target: <code>GOOS=js GOARCH=wasm</code>, Go <code>1.27.0</code>, 2026-09-01.</p>
+      <p>审计目标 / Audit target: ordinary and <code>tailcat_webrtc_experiment</code> <code>GOOS=js GOARCH=wasm</code> graphs, Go <code>1.27.0</code>, 2026-09-02.</p>
       <p>以下链接指向所列固定版本的完整许可证。许可证文件哈希、包级附加许可和审计方法见 <a href="/THIRD_PARTY_NOTICES.md">随站分发的第三方通知</a>；Apache 2.0 全文也<a href="/licenses/APACHE-2.0.txt">随站提供</a>。The links below point to the complete license at each pinned revision. License-file hashes, package-level notices, and the audit method are in the <a href="/THIRD_PARTY_NOTICES.md">locally distributed notice</a>; the complete <a href="/licenses/APACHE-2.0.txt">Apache License 2.0</a> is bundled too.</p>
 
       <h3>BSD family</h3>
@@ -89,12 +89,14 @@
         <li><code>filippo.io/edwards25519 v1.2.0</code> — Copyright (c) 2009 The Go Authors. All rights reserved. — <a href="https://github.com/FiloSottile/edwards25519/blob/v1.2.0/LICENSE">LICENSE</a></li>
         <li><code>github.com/creachadair/msync v0.8.1</code> — Copyright (C) 2022, Michael J. Fromberger; All Rights Reserved. — <a href="https://github.com/creachadair/msync/blob/v0.8.1/LICENSE">LICENSE</a></li>
         <li><code>github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68</code> — Copyright (c) 2020 The Go Authors. All rights reserved. — <a href="https://github.com/go-json-experiment/json/blob/01eb4420fa68/LICENSE">LICENSE</a></li>
+        <li><code>github.com/google/uuid v1.6.0</code> — Copyright (c) 2009,2014 Google Inc. All rights reserved. — <a href="https://github.com/google/uuid/blob/v1.6.0/LICENSE">LICENSE</a></li>
         <li><code>github.com/hdevalence/ed25519consensus v0.2.0</code> — Copyright (c) 2009 The Go Authors; Copyright (c) 2020 Henry de Valence. — <a href="https://github.com/hdevalence/ed25519consensus/blob/v0.2.0/LICENSE">LICENSE</a></li>
         <li><code>github.com/klauspost/compress v1.19.1</code> — Copyright (c) 2012 The Go Authors; Copyright (c) 2019 Klaus Post. — <a href="https://github.com/klauspost/compress/blob/v1.19.1/LICENSE">LICENSE</a></li>
         <li><code>github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd</code> — Copyright (c) 2019 Tailscale Inc. — <a href="https://github.com/tailscale/hujson/blob/ecc657c15afd/LICENSE">LICENSE</a></li>
         <li><code>github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc</code> — Copyright (c) 2021, Tailscale Inc. — <a href="https://github.com/tailscale/peercred/blob/35a0c7bd7edc/LICENSE">LICENSE</a></li>
         <li><code>github.com/tailscale/tailcat v0.4.0</code> — Copyright (c) 2020 Tailscale Inc &amp; contributors. — <a href="https://github.com/tailscale/tailcat/blob/v0.4.0/LICENSE">LICENSE</a></li>
         <li><code>github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976</code> — Copyright (c) 2020 Tailscale Inc &amp; AUTHORS. — <a href="https://github.com/tailscale/web-client-prebuilt/blob/d4cd19a26976/LICENSE">LICENSE</a></li>
+        <li><code>github.com/wlynxg/anet v0.0.5</code> — Copyright (c) 2023, wlynxg — <a href="https://github.com/wlynxg/anet/blob/v0.0.5/LICENSE">LICENSE</a></li>
         <li><code>go4.org/netipx v0.0.0-20260823151212-3075585bcbeb</code> — Copyright (c) 2020 The Inet.af AUTHORS. — <a href="https://github.com/go4org/netipx/blob/3075585bcbeb/LICENSE">LICENSE</a></li>
         <li><code>golang.org/x/crypto v0.55.0</code> — Copyright 2009 The Go Authors. — <a href="https://github.com/golang/crypto/blob/v0.55.0/LICENSE">LICENSE</a></li>
         <li><code>golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f</code> — Copyright 2009 The Go Authors. — <a href="https://github.com/golang/exp/blob/746e56fc9e2f/LICENSE">LICENSE</a></li>
@@ -104,13 +106,28 @@
         <li><code>golang.org/x/term v0.45.0</code> — Copyright 2009 The Go Authors. — <a href="https://github.com/golang/term/blob/v0.45.0/LICENSE">LICENSE</a></li>
         <li><code>golang.org/x/text v0.41.0</code> — Copyright 2009 The Go Authors. — <a href="https://github.com/golang/text/blob/v0.41.0/LICENSE">LICENSE</a></li>
         <li><code>golang.org/x/time v0.15.0</code> — Copyright 2009 The Go Authors. — <a href="https://github.com/golang/time/blob/v0.15.0/LICENSE">LICENSE</a></li>
-        <li><code>tailscale.com v1.103.0-pre.0.20260830144538-72780705eda8</code> — Copyright (c) 2020 Tailscale Inc &amp; contributors. — <a href="https://github.com/tailscale/tailscale/blob/72780705eda8/LICENSE">LICENSE</a>; <a href="https://github.com/tailscale/tailscale/blob/72780705eda8/PATENTS">PATENTS</a></li>
+        <li><code>tailscale.com v1.103.0-pre.0.20260830144538-72780705eda8</code> → <code>github.com/chaiyalin/tailscale v0.0.0-20260902082517-7d20ed5680aa</code> — Copyright (c) 2020 Tailscale Inc &amp; contributors. — <a href="https://github.com/chaiyalin/tailscale/blob/7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7/LICENSE">LICENSE</a>; <a href="https://github.com/chaiyalin/tailscale/blob/7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7/PATENTS">PATENTS</a></li>
       </ul>
 
       <h3>MIT family</h3>
       <ul>
         <li><code>github.com/fxamacker/cbor/v2 v2.9.0</code> — Copyright (c) 2019-present Faye Amacker — <a href="https://github.com/fxamacker/cbor/blob/v2.9.0/LICENSE">LICENSE</a></li>
         <li><code>github.com/gaissmai/bart v0.26.1</code> — Copyright (c) 2024 Karl Gaissmaier — <a href="https://github.com/gaissmai/bart/blob/v0.26.1/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/datachannel v1.6.2</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/datachannel/blob/v1.6.2/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/dtls/v3 v3.1.5</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/dtls/blob/v3.1.5/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/ice/v4 v4.4.0</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/ice/blob/v4.4.0/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/interceptor v0.1.47</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/interceptor/blob/v0.1.47/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/logging v0.2.4</code> — Copyright (c) 2023 The Pion community — <a href="https://github.com/pion/logging/blob/v0.2.4/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/mdns/v2 v2.1.0</code> — Copyright (c) 2018 — <a href="https://github.com/pion/mdns/blob/v2.1.0/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/randutil v0.1.0</code> — Copyright (c) 2020 Pion — <a href="https://github.com/pion/randutil/blob/v0.1.0/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/rtcp v1.2.17</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/rtcp/blob/v1.2.17/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/rtp v1.10.5</code> — upstream license retains its placeholder copyright notice — <a href="https://github.com/pion/rtp/blob/v1.10.5/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/sctp v1.11.1</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/sctp/blob/v1.11.1/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/sdp/v3 v3.0.19</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/sdp/blob/v3.0.19/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/stun/v3 v3.1.6</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/stun/blob/v3.1.6/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/transport/v4 v4.0.2</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/transport/blob/v4.0.2/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/turn/v5 v5.0.12</code> — Copyright (c) 2026 The Pion community; linked transitively, with no TURN service configured by tailcat.app — <a href="https://github.com/pion/turn/blob/v5.0.12/LICENSE">LICENSE</a></li>
+        <li><code>github.com/pion/webrtc/v4 v4.2.18</code> — Copyright (c) 2026 The Pion community — <a href="https://github.com/pion/webrtc/blob/v4.2.18/LICENSE">LICENSE</a></li>
         <li><code>github.com/tailscale/wireguard-go v0.0.0-20260821191448-23d18d66172c</code> — source headers: Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved. — <a href="https://github.com/tailscale/wireguard-go/blob/23d18d66172c/LICENSE">LICENSE</a></li>
         <li><code>github.com/x448/float16 v0.8.4</code> — Copyright (c) 2019 Montgomery Edwards⁴⁴⁸ and Faye Amacker — <a href="https://github.com/x448/float16/blob/v0.8.4/LICENSE">LICENSE</a></li>
       </ul>

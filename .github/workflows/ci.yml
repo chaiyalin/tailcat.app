@@ -2,9 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/mobile-support]
+    branches: [main, feature/mobile-support, feature/webrtc-magicsock-experiment]
   pull_request:
   workflow_dispatch:
+    inputs:
+      live_webrtc:
+        description: Run the opt-in live WebRTC/DERP smoke test
+        required: false
+        default: false
+        type: boolean
+      live_webrtc_gate2:
+        description: Add the Chromium 100 MiB/CDP DERP-byte check
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -16,9 +27,26 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      GOWORK: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Reject experimental transport in production
+        if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+        shell: bash
+        run: |
+          test ! -e WEBRTC_FORK.lock
+          test ! -e WEBRTC_EXPERIMENT.md
+          if grep -Eq 'github\.com/chaiyalin/tailscale|tailcat_webrtc_experiment' go.mod ./*.go; then
+            echo "the draft WebRTC transport must not enter the production branch" >&2
+            exit 1
+          fi
+          if grep -Fq '+webrtc-lab' web/config.js; then
+            echo "the laboratory application configuration must not enter production" >&2
+            exit 1
+          fi
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -29,51 +57,288 @@ jobs:
       - name: Verify pinned dependencies
         shell: bash
         run: |
+          module_policy="$(go mod edit -json)"
+          replacement_count="$(jq '(.Replace // []) | length' <<<"$module_policy")"
+          if [[ -e WEBRTC_FORK.lock ]]; then
+            test "$replacement_count" -eq 1
+            jq -e '
+              .Replace[0].Old.Path == "tailscale.com" and
+              (.Replace[0].Old.Version == null) and
+              .Replace[0].New.Path == "github.com/chaiyalin/tailscale" and
+              .Replace[0].New.Version == "v0.0.0-20260902082517-7d20ed5680aa"
+            ' <<<"$module_policy" >/dev/null
+          else
+            test "$replacement_count" -eq 0
+          fi
           go mod download
           go mod verify
-          test "$(go list -m -f '{{.Version}}' github.com/tailscale/tailcat)" = "v0.4.0"
+          tailcat_line="$(go list -mod=readonly -m -f '{{.Path}} {{.Version}} {{if .Replace}}=> {{.Replace.Path}} {{.Replace.Version}}{{else}}{{.Sum}} {{.GoModSum}}{{end}}' github.com/tailscale/tailcat)"
+          test "$tailcat_line" = 'github.com/tailscale/tailcat v0.4.0 h1:WA8QIBcnn+x7BBmay3mPY+EeOp14RTQr4Qv1Df1GOxU= h1:ehG1UYhg+wPqPe8rlpmSyt9O+IMkBoxwA819l6qnM8Y='
+          test "$(grep -Ec '^github\.com/tailscale/tailcat v' go.sum)" -eq 2
+          grep -Fxq 'github.com/tailscale/tailcat v0.4.0 h1:WA8QIBcnn+x7BBmay3mPY+EeOp14RTQr4Qv1Df1GOxU=' go.sum
+          grep -Fxq 'github.com/tailscale/tailcat v0.4.0/go.mod h1:ehG1UYhg+wPqPe8rlpmSyt9O+IMkBoxwA819l6qnM8Y=' go.sum
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+
+      - name: Verify immutable WebRTC fork provenance
+        shell: bash
+        run: |
+          if [[ ! -e WEBRTC_FORK.lock ]]; then
+            exit 0
+          fi
+          test -s WEBRTC_FORK.lock
+          assert_lock() {
+            local key="$1"
+            local expected="$2"
+            test "$(grep -c "^${key}=" WEBRTC_FORK.lock)" -eq 1
+            grep -Fxq "${key}=${expected}" WEBRTC_FORK.lock
+          }
+
+          assert_lock schema 1
+          assert_lock application_base d6baa08a8c5afb8bc1e8c097d86446a9143d57c6
+          assert_lock required_module tailscale.com
+          assert_lock required_version v1.103.0-pre.0.20260830144538-72780705eda8
+          assert_lock replacement_module github.com/chaiyalin/tailscale
+          assert_lock replacement_version v0.0.0-20260902082517-7d20ed5680aa
+          assert_lock replacement_zip_sum 'h1:0REUtGl7yeI6ZA5mXZkhPjfrBuzWmFVEWqHgpsQZuLI='
+          assert_lock replacement_go_mod_sum 'h1:VKD7hKqFAaDnzxUaS8vv7FAQlE4pZtpCz4mNUF9gYu8='
+          assert_lock fork_branch tailcat-app-webrtc-experiment
+          assert_lock tailscale_base 72780705eda81790e839a0793a90bdea4164d3ca
+          assert_lock upstream_pr 21030
+          assert_lock upstream_draft_commit 230e095afe936162992e12224c6486d26368fc60
+          assert_lock upstream_draft_patch_id 535713efce04504b996b5b3943c5108bbdc2ccc3
+          assert_lock draft_applied_commit 06cc7d3fc46f344dc0a899fc6bd42139a6fecb2f
+          assert_lock config_commit 0a79d89a31b60b7d0bdf7a2dd45e59491b0e89d3
+          assert_lock config_patch_id 47c5608d9694134d1223bf2fc1b53b961261b508
+          assert_lock fork_commit 7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7
+          assert_lock fork_patch_id 4b65234aa15a3981be16e0e0d6ca0ef86545a100
+          assert_lock tailcat_module github.com/tailscale/tailcat
+          assert_lock tailcat_version v0.4.0
+          assert_lock tailcat_zip_sum 'h1:WA8QIBcnn+x7BBmay3mPY+EeOp14RTQr4Qv1Df1GOxU='
+          assert_lock tailcat_go_mod_sum 'h1:ehG1UYhg+wPqPe8rlpmSyt9O+IMkBoxwA819l6qnM8Y='
+          assert_lock build_tag tailcat_webrtc_experiment
+          assert_lock stun_url stun:stun.cloudflare.com:3478
+          assert_lock turn_enabled false
+          assert_lock data_channel_low_water_bytes 524288
+          assert_lock data_channel_high_water_bytes 1048576
+          assert_lock data_channel_send_wait_seconds 10
+          test "$(wc -l < WEBRTC_FORK.lock | tr -d ' ')" -eq 28
+
+          expected_module='github.com/chaiyalin/tailscale v0.0.0-20260902082517-7d20ed5680aa'
+          expected_zip='h1:0REUtGl7yeI6ZA5mXZkhPjfrBuzWmFVEWqHgpsQZuLI='
+          expected_go_mod='h1:VKD7hKqFAaDnzxUaS8vv7FAQlE4pZtpCz4mNUF9gYu8='
+          module_line="$(go list -mod=readonly -m -f '{{if eq .Path "tailscale.com"}}{{.Path}} {{.Version}} => {{with .Replace}}{{.Path}} {{.Version}} {{.Sum}} {{.GoModSum}}{{end}}{{end}}' all)"
+          test "$module_line" = "tailscale.com v1.103.0-pre.0.20260830144538-72780705eda8 => ${expected_module} ${expected_zip} ${expected_go_mod}"
+          test "$(grep -Ec '^github\.com/chaiyalin/tailscale v' go.sum)" -eq 2
+          grep -Fxq "${expected_module} ${expected_zip}" go.sum
+          grep -Fxq "${expected_module}/go.mod ${expected_go_mod}" go.sum
+
+          fork_audit="$RUNNER_TEMP/tailscale-fork-audit"
+          git init -q "$fork_audit"
+          git -C "$fork_audit" remote add fork https://github.com/chaiyalin/tailscale.git
+          git -C "$fork_audit" fetch -q --depth=4 fork 7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7
+          test "$(git ls-remote https://github.com/chaiyalin/tailscale.git refs/heads/tailcat-app-webrtc-experiment | cut -f1)" = '7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7'
+          test "$(git -C "$fork_audit" rev-parse 7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7^)" = '0a79d89a31b60b7d0bdf7a2dd45e59491b0e89d3'
+          test "$(git -C "$fork_audit" rev-parse 0a79d89a31b60b7d0bdf7a2dd45e59491b0e89d3^)" = '06cc7d3fc46f344dc0a899fc6bd42139a6fecb2f'
+          test "$(git -C "$fork_audit" rev-parse 06cc7d3fc46f344dc0a899fc6bd42139a6fecb2f^)" = '72780705eda81790e839a0793a90bdea4164d3ca'
+          test "$(git -C "$fork_audit" show 06cc7d3fc46f344dc0a899fc6bd42139a6fecb2f | git patch-id --stable | cut -d' ' -f1)" = '535713efce04504b996b5b3943c5108bbdc2ccc3'
+          test "$(git -C "$fork_audit" show 0a79d89a31b60b7d0bdf7a2dd45e59491b0e89d3 | git patch-id --stable | cut -d' ' -f1)" = '47c5608d9694134d1223bf2fc1b53b961261b508'
+          test "$(git -C "$fork_audit" show 7d20ed5680aa16a75d5ecd095bf69f7b1c86e5a7 | git patch-id --stable | cut -d' ' -f1)" = '4b65234aa15a3981be16e0e0d6ca0ef86545a100'
+          git -C "$fork_audit" remote add upstream https://github.com/tailscale/tailscale.git
+          # Include the parent: patch-id must be calculated from the commit
+          # diff, not from a shallow-root snapshot.
+          git -C "$fork_audit" fetch -q --depth=2 upstream 230e095afe936162992e12224c6486d26368fc60
+          test "$(git -C "$fork_audit" show 230e095afe936162992e12224c6486d26368fc60 | git patch-id --stable | cut -d' ' -f1)" = '535713efce04504b996b5b3943c5108bbdc2ccc3'
 
       - name: Check source formatting and build script
         shell: bash
         run: |
-          test -z "$(gofmt -l -- *.go)"
+          test -z "$(gofmt -l -- *.go .github/scripts/*.go)"
           bash -n build.sh
+          if GOFLAGS=-trimpath ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted an externally injected GOFLAGS value" >&2
+            exit 1
+          fi
+          if CF_PAGES_COMMIT_SHA=0000000000000000000000000000000000000000 ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted a mismatched Pages commit SHA" >&2
+            exit 1
+          fi
+          if TAILCAT_WEBRTC_EXPERIMENT=unexpected ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted an invalid experiment switch" >&2
+            exit 1
+          fi
+          if CF_PAGES=1 CF_PAGES_BRANCH=main CF_PAGES_URL=https://tailcat-app-webrtc.pages.dev TAILCAT_WEBRTC_EXPERIMENT=1 ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted the laboratory mode on the wrong Pages branch" >&2
+            exit 1
+          fi
+          if CF_PAGES=1 CF_PAGES_BRANCH=feature/webrtc-magicsock-experiment CF_PAGES_URL=https://tailcat-app.pages.dev TAILCAT_WEBRTC_EXPERIMENT=1 ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted the laboratory mode in the production Pages project" >&2
+            exit 1
+          fi
+          if CF_PAGES=1 CF_PAGES_BRANCH=feature/webrtc-magicsock-experiment CF_PAGES_URL=https://tailcat-app.pages.dev ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted a production-project preview of the laboratory branch" >&2
+            exit 1
+          fi
+          if [[ -e WEBRTC_FORK.lock ]] && CF_PAGES=1 CF_PAGES_BRANCH=main CF_PAGES_URL=https://tailcat-app.pages.dev ./build.sh dist >/dev/null 2>&1; then
+            echo "build.sh accepted laboratory sources in the production Pages project" >&2
+            exit 1
+          fi
+          go test -mod=readonly ./.github/scripts
 
       - name: Test the WebAssembly package
         env:
           GOOS: js
           GOARCH: wasm
-        run: go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
+        run: go test -mod=readonly -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
+
+      - name: Test the experimental WebRTC bridge
+        if: github.ref == 'refs/heads/feature/webrtc-magicsock-experiment' || github.head_ref == 'feature/webrtc-magicsock-experiment' || github.base_ref == 'feature/webrtc-magicsock-experiment'
+        env:
+          GOOS: js
+          GOARCH: wasm
+        run: go test -mod=readonly -tags=tailcat_webrtc_experiment -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
+
+      - name: Test the pinned WebRTC fork package
+        if: github.ref == 'refs/heads/feature/webrtc-magicsock-experiment' || github.head_ref == 'feature/webrtc-magicsock-experiment' || github.base_ref == 'feature/webrtc-magicsock-experiment'
+        shell: bash
+        run: |
+          go test -mod=readonly tailscale.com/feature/webrtc
+          go test -mod=readonly -race tailscale.com/feature/webrtc
+          go test -mod=readonly -run WebRTC tailscale.com/wgengine/magicsock
+          go test -mod=readonly -race -run WebRTC tailscale.com/wgengine/magicsock
+          GOOS=js GOARCH=wasm go test -mod=readonly -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" tailscale.com/feature/webrtc
+
+      - name: Verify ordinary-build WebRTC isolation
+        shell: bash
+        run: |
+          mkdir -p build-evidence
+          GOOS=js GOARCH=wasm go list -mod=readonly -deps . > build-evidence/go-deps-derp.txt
+          default_deps="$(cat build-evidence/go-deps-derp.txt)"
+          if grep -Fxq 'tailscale.com/feature/webrtc' <<<"$default_deps"; then
+            echo "the ordinary build must not link the draft WebRTC feature" >&2
+            exit 1
+          fi
+          if grep -Eq '^github\.com/pion/' <<<"$default_deps"; then
+            echo "the ordinary build must not link the experimental Pion WebRTC stack" >&2
+            exit 1
+          fi
+
+      - name: Verify experimental WebRTC compile graph
+        if: github.ref == 'refs/heads/feature/webrtc-magicsock-experiment' || github.head_ref == 'feature/webrtc-magicsock-experiment' || github.base_ref == 'feature/webrtc-magicsock-experiment'
+        shell: bash
+        run: |
+          GOOS=js GOARCH=wasm go list -mod=readonly -tags=tailcat_webrtc_experiment -deps . > build-evidence/go-deps-webrtc.txt
+          experiment_deps="$(cat build-evidence/go-deps-webrtc.txt)"
+          grep -Fxq 'tailscale.com/feature/webrtc' <<<"$experiment_deps"
 
       - name: Build the Cloudflare Pages artifact
         env:
           PAGES_BUILD: "1"
-        run: ./build.sh dist
+        run: |
+          ./build.sh dist
+          mv dist dist-derp-first
+          ./build.sh dist
+          diff -qr dist-derp-first dist
+          rm -rf -- dist-derp-first
+          mv dist dist-derp
+
+      - name: Build the experimental Cloudflare Pages artifact
+        if: github.ref == 'refs/heads/feature/webrtc-magicsock-experiment' || github.head_ref == 'feature/webrtc-magicsock-experiment' || github.base_ref == 'feature/webrtc-magicsock-experiment'
+        env:
+          PAGES_BUILD: "1"
+          TAILCAT_WEBRTC_EXPERIMENT: "1"
+        run: |
+          ./build.sh dist
+          mv dist dist-webrtc-first
+          ./build.sh dist
+          diff -qr dist-webrtc-first dist
+          rm -rf -- dist-webrtc-first
+          mv dist dist-webrtc
 
       - name: Enforce Cloudflare Pages artifact limits
         shell: bash
         run: |
-          for required in index.html app.js file-sinks.js mobile-runtime.js opfs-worker.js wasm_exec.js main.wasm.gz LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
-            test -s "dist/$required"
+          artifacts=(dist-derp)
+          if [[ -d dist-webrtc ]]; then
+            artifacts+=(dist-webrtc)
+          fi
+          for artifact in "${artifacts[@]}"; do
+            for required in index.html app.js file-sinks.js mobile-runtime.js opfs-worker.js wasm_exec.js main.wasm.gz LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
+              test -s "$artifact/$required"
+            done
+            test ! -e "$artifact/main.wasm"
+            oversized="$(find "$artifact" -type f -size +26214400c -print)"
+            if [[ -n "$oversized" ]]; then
+              echo "Cloudflare Pages files must not exceed 25 MiB:" >&2
+              echo "$oversized" >&2
+              exit 1
+            fi
+            if grep -Eqi '^[[:space:]]*Content-Encoding[[:space:]]*:[[:space:]]*gzip[[:space:]]*$' "$artifact/_headers"; then
+              echo "main.wasm.gz is decompressed by the browser and must not be served with Content-Encoding: gzip" >&2
+              exit 1
+            fi
+            grep -Eq '^/main\.wasm\.gz[[:space:]]*$' "$artifact/_headers"
+            grep -Eqi '^[[:space:]]*Content-Type[[:space:]]*:[[:space:]]*application/gzip[[:space:]]*$' "$artifact/_headers"
+            grep -Eqi '^[[:space:]]*![[:space:]]*Content-Encoding[[:space:]]*$' "$artifact/_headers"
+            grep -Eqi 'X-Robots-Tag:[[:space:]]*noindex' "$artifact/_headers"
+            grep -Eqi "Content-Security-Policy:.*frame-ancestors 'none'.*object-src 'none'" "$artifact/_headers"
           done
-          test ! -e dist/main.wasm
-          oversized="$(find dist -type f -size +26214400c -print)"
-          if [[ -n "$oversized" ]]; then
-            echo "Cloudflare Pages files must not exceed 25 MiB:" >&2
-            echo "$oversized" >&2
-            exit 1
+          grep -Fq '__TAILCAT_WEBRTC_LAB__: { value: false' dist-derp/build-info.js
+          if [[ -d dist-webrtc ]]; then
+            grep -Fq '__TAILCAT_WEBRTC_LAB__: { value: true' dist-webrtc/build-info.js
           fi
-          if [[ -f dist/_headers ]] && grep -Eqi '^[[:space:]]*Content-Encoding[[:space:]]*:[[:space:]]*gzip[[:space:]]*$' dist/_headers; then
-            echo "main.wasm.gz is decompressed by the browser and must not be served with Content-Encoding: gzip" >&2
-            exit 1
+          audit_files=()
+          wasm_checks=()
+          for artifact in "${artifacts[@]}"; do
+            while IFS= read -r -d '' file; do
+              audit_files+=("$file")
+            done < <(find "$artifact" -type f ! -name main.wasm.gz -print0)
+            wasm_check="$RUNNER_TEMP/$(basename "$artifact").wasm"
+            gzip -dc "$artifact/main.wasm.gz" > "$wasm_check"
+            audit_files+=("$wasm_check")
+            wasm_checks+=("$wasm_check")
+            if [[ "$artifact" == "dist-webrtc" ]]; then
+              grep -aFq 'stun:stun.cloudflare.com:3478' "$wasm_check"
+            fi
+          done
+          go run -mod=readonly .github/scripts/audit-artifact.go "${audit_files[@]}"
+          for wasm_check in "${wasm_checks[@]}"; do
+            rm -- "$wasm_check"
+          done
+
+      - name: Record reproducible build evidence
+        shell: bash
+        run: |
+          mkdir -p build-evidence
+          git rev-parse HEAD > build-evidence/application-commit.txt
+          go version > build-evidence/go-version.txt
+          go list -mod=readonly -m all > build-evidence/go-modules.txt
+          evidence_artifacts=(dist-derp)
+          if [[ -d dist-webrtc ]]; then
+            evidence_artifacts+=(dist-webrtc)
           fi
-          grep -Eq '^/main\.wasm\.gz[[:space:]]*$' dist/_headers
-          grep -Eqi '^[[:space:]]*Content-Type[[:space:]]*:[[:space:]]*application/gzip[[:space:]]*$' dist/_headers
-          grep -Eqi '^[[:space:]]*![[:space:]]*Content-Encoding[[:space:]]*$' dist/_headers
-          grep -Eqi 'X-Robots-Tag:[[:space:]]*noindex' dist/_headers
-          grep -Eqi "Content-Security-Policy:.*frame-ancestors 'none'.*object-src 'none'" dist/_headers
+          find "${evidence_artifacts[@]}" -type f -print0 | sort -z | xargs -0 sha256sum > build-evidence/SHA256SUMS
+          for artifact in "${evidence_artifacts[@]}"; do
+            wasm_check="$RUNNER_TEMP/$(basename "$artifact")-version.wasm"
+            gzip -dc "$artifact/main.wasm.gz" > "$wasm_check"
+            go version -m "$wasm_check" > "build-evidence/go-version-m-$(basename "$artifact").txt"
+            rm -- "$wasm_check"
+          done
+          printf 'ordinary and experimental mode rebuilds were byte-for-byte identical\n' > build-evidence/reproducibility.txt
+
+      - name: Upload Pages artifact and dependency evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tailcat-pages-${{ github.sha }}
+          path: |
+            dist-derp
+            dist-webrtc
+            build-evidence
+            WEBRTC_EXPERIMENT.md
+            WEBRTC_FORK.lock
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
 
   browser-e2e:
     needs: build-and-test
@@ -86,12 +351,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: 1.27.0
-          check-latest: false
-          cache: true
 
       - name: Require the browser E2E test contract
         shell: bash
@@ -106,5 +365,79 @@ jobs:
       - name: Install supported browser channels
         run: npx playwright install --with-deps chrome msedge webkit
 
-      - name: Run desktop and mobile-browser end-to-end tests
-        run: npm run test:e2e
+      - name: Download the exact reviewed Pages artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tailcat-pages-${{ github.sha }}
+          path: ci-build
+
+      - name: Run the ordinary DERP-only browser suite
+        env:
+          PLAYWRIGHT_OUTPUT_DIR: test-results-derp
+          PLAYWRIGHT_REPORT_DIR: playwright-report-derp
+          TAILCAT_WEBRTC_EXPERIMENT: "0"
+          E2E_DIST_DIR: ci-build/dist-derp
+        run: npx playwright test
+
+      - name: Run the experimental WebRTC browser suite
+        if: github.ref == 'refs/heads/feature/webrtc-magicsock-experiment' || github.head_ref == 'feature/webrtc-magicsock-experiment' || github.base_ref == 'feature/webrtc-magicsock-experiment'
+        env:
+          PLAYWRIGHT_OUTPUT_DIR: test-results-webrtc
+          PLAYWRIGHT_REPORT_DIR: playwright-report-webrtc
+          TAILCAT_WEBRTC_EXPERIMENT: "1"
+          E2E_DIST_DIR: ci-build/dist-webrtc
+        run: npx playwright test
+
+      - name: Upload browser test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-${{ github.sha }}
+          path: |
+            playwright-report-*
+            test-results-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  live-webrtc:
+    if: github.event_name == 'workflow_dispatch' && inputs.live_webrtc && github.ref == 'refs/heads/feature/webrtc-magicsock-experiment'
+    needs: [build-and-test, browser-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chrome
+
+      - name: Download the exact reviewed WebRTC Pages artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tailcat-pages-${{ github.sha }}
+          path: ci-build
+
+      - name: Run live WebRTC transport smoke test
+        env:
+          LIVE_WEBRTC: "1"
+          PLAYWRIGHT_OUTPUT_DIR: test-results-live
+          PLAYWRIGHT_REPORT_DIR: playwright-report-live
+          TAILCAT_WEBRTC_EXPERIMENT: "1"
+          LIVE_WEBRTC_GATE2: ${{ inputs.live_webrtc_gate2 && '1' || '0' }}
+          E2E_DIST_DIR: ci-build/dist-webrtc
+        run: npx playwright test --project=chrome --grep "live WebRTC"
+
+      - name: Upload live-test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: live-webrtc-${{ github.sha }}
+          path: |
+            playwright-report-live
+            test-results-live
+          if-no-files-found: ignore
+          retention-days: 14

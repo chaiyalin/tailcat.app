@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 
 test("publishes the production security and compressed-WASM headers", async ({ request }) => {
-  const configured = await readFile(resolve(process.cwd(), "dist/_headers"), "utf8");
+  const configured = await readFile(resolve(
+    process.cwd(),
+    process.env.E2E_DIST_DIR || "dist",
+    "_headers",
+  ), "utf8");
   expect(configured).toContain("Content-Security-Policy:");
   expect(configured).toContain("connect-src 'self' https://tailcat.dev https://*.ipn.dev wss://*.ipn.dev");
   expect(configured).toContain("frame-ancestors 'none'");
@@ -32,6 +36,14 @@ test("publishes the production security and compressed-WASM headers", async ({ r
 
   const uncompressedWasm = await request.get("/main.wasm");
   expect(uncompressedWasm.status()).toBe(404);
+
+  const buildInfo = await request.get("/build-info.js");
+  expect(buildInfo.ok()).toBeTruthy();
+  const buildInfoSource = await buildInfo.text();
+  const labEnabled = process.env.TAILCAT_WEBRTC_EXPERIMENT === "1";
+  expect(buildInfoSource).toContain(
+    `__TAILCAT_WEBRTC_LAB__: { value: ${labEnabled ? "true" : "false"}`,
+  );
 
   const opfsWorker = await request.get("/opfs-worker.js");
   expect(opfsWorker.status()).toBe(200);

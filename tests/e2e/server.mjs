@@ -2,7 +2,7 @@ import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 
-const root = resolve(process.cwd(), "dist");
+const root = resolve(process.cwd(), process.env.E2E_DIST_DIR || "dist");
 const port = Number(process.env.PORT || 4173);
 
 const mimeTypes = {
