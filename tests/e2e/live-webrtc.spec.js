@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import { installMockSavePicker } from "./mock-tailcat.js";
 
@@ -14,6 +14,39 @@ const bilateralWebRTC = Object.freeze([
   Object.freeze({ local: "webrtc", peer: "webrtc", bilateral: "webrtc" }),
   Object.freeze({ local: "webrtc", peer: "webrtc", bilateral: "webrtc" }),
 ]);
+const commitSHA = /^[0-9a-f]{40}$/u;
+const shortOrFullCommitSHA = /^[0-9a-f]{12}(?:[0-9a-f]{28})?$/u;
+
+async function readPinnedForkSHA() {
+  const explicit = String(process.env.WEBRTC_FORK_SHA || "").trim().toLowerCase();
+  if (shortOrFullCommitSHA.test(explicit)) return explicit;
+
+  const artifactRoot = dirname(resolve(process.env.E2E_DIST_DIR || "dist"));
+  const candidates = [
+    resolve("WEBRTC_FORK.lock"),
+    join(artifactRoot, "WEBRTC_FORK.lock"),
+    join(artifactRoot, "build-evidence", "go-version-m-dist-webrtc.txt"),
+    join(artifactRoot, "build-evidence", "go-modules.txt"),
+  ];
+  for (const candidate of candidates) {
+    let text;
+    try {
+      text = await readFile(candidate, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const labelled = text.match(
+      /(?:webrtc[_ -]?fork|fork[_ -]?(?:commit|sha))[^\r\n0-9a-f]{0,80}([0-9a-f]{40})\b/iu,
+    );
+    if (labelled) return labelled[1].toLowerCase();
+    const pseudoVersion = text.match(
+      /github\.com\/chaiyalin\/tailscale(?:\s+|@)v[^\s]*-([0-9a-f]{12})\b/iu,
+    );
+    if (pseudoVersion) return pseudoVersion[1].toLowerCase();
+  }
+  throw new Error("pinned WebRTC fork commit evidence is unavailable");
+}
 
 async function assertExperimentalRuntime(page) {
   const runtime = await page.evaluate((expectedSTUNURL) => {
@@ -157,13 +190,16 @@ function isIPNDevWebSocket(rawURL) {
 async function attachDERPWebSocketMeter(context, page) {
   const session = await context.newCDPSession(page);
   const trackedSockets = new Map();
+  const matchedSocketIDs = new Set();
   let sentBytes = 0;
   let receivedBytes = 0;
 
   session.on("Network.webSocketCreated", ({ requestId, url }) => {
     // Persist only a request identifier and a classification bit. The URL is
     // inspected on this stack frame and is never retained or reported.
-    trackedSockets.set(requestId, isIPNDevWebSocket(url));
+    const isDERP = isIPNDevWebSocket(url);
+    trackedSockets.set(requestId, isDERP);
+    if (isDERP) matchedSocketIDs.add(requestId);
   });
   session.on("Network.webSocketClosed", ({ requestId }) => {
     trackedSockets.delete(requestId);
@@ -177,12 +213,21 @@ async function attachDERPWebSocketMeter(context, page) {
   await session.send("Network.enable");
 
   return {
-    snapshot: () => Object.freeze({ sentBytes, receivedBytes }),
+    snapshot: () => Object.freeze({
+      sentBytes,
+      receivedBytes,
+      matchedSocketCount: matchedSocketIDs.size,
+    }),
     close: async () => {
       trackedSockets.clear();
+      matchedSocketIDs.clear();
       await session.detach();
     },
   };
+}
+
+function derpByteTotal(snapshots) {
+  return snapshots.reduce((total, snapshot) => total + snapshot.sentBytes + snapshot.receivedBytes, 0);
 }
 
 function combinedDERPDelta(after, before) {
@@ -290,6 +335,7 @@ test("live WebRTC Gate 2 keeps a verified 100 MiB transfer off DERP", async ({ b
   test.setTimeout(900_000);
 
   const payloadBytes = 100 * 1024 * 1024;
+  const forkSHA = await readPinnedForkSHA();
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "tc-webrtc-g2-"));
   const payloadPath = join(temporaryDirectory, "payload.bin");
   let hostContext;
@@ -319,6 +365,11 @@ test("live WebRTC Gate 2 keeps a verified 100 MiB transfer off DERP", async ({ b
       await assertExperimentalRuntime(page);
       await installDiagnosticsCapture(page);
     }));
+    const [hostAppSHA, guestAppSHA] = await Promise.all([host, guest].map((page) => (
+      page.evaluate(() => String(globalThis.__TAILCAT_BUILD_SHA__ || "").toLowerCase())
+    )));
+    expect(commitSHA.test(hostAppSHA), "host application build SHA").toBe(true);
+    expect(guestAppSHA, "both pages must run the same reviewed application build").toBe(hostAppSHA);
 
     await installMockSavePicker(host);
     await connectTokyoPair(host, guest);
@@ -332,6 +383,11 @@ test("live WebRTC Gate 2 keeps a verified 100 MiB transfer off DERP", async ({ b
       readNumericDiagnostics(host),
     ]);
     const derpBefore = [hostMeter.snapshot(), guestMeter.snapshot()];
+    for (const snapshot of derpBefore) {
+      expect(snapshot.matchedSocketCount, "each page must expose a measured DERP WebSocket").toBeGreaterThanOrEqual(1);
+    }
+    const derpBaselineBytes = derpByteTotal(derpBefore);
+    expect(derpBaselineBytes, "DERP instrumentation must observe pre-transfer signaling bytes").toBeGreaterThan(0);
 
     await guest.locator("#send-file").setInputFiles(payloadPath);
     const offer = host.locator(".incoming-transfer").nth(offerCount);
@@ -382,9 +438,42 @@ test("live WebRTC Gate 2 keeps a verified 100 MiB transfer off DERP", async ({ b
 
     const derpAfter = [hostMeter.snapshot(), guestMeter.snapshot()];
     const derpDelta = combinedDERPDelta(derpAfter, derpBefore);
+    const derpFraction = derpDelta / payloadBytes;
     expect(derpDelta, "combined DERP WebSocket payload bytes").toBeLessThan(2 * 1024 * 1024);
-    expect(derpDelta / payloadBytes, "combined DERP fraction").toBeLessThan(0.02);
-    expect(await readSanitizedPaths([host, guest])).toEqual(bilateralWebRTC);
+    expect(derpFraction, "combined DERP fraction").toBeLessThan(0.02);
+    const paths = await readSanitizedPaths([host, guest]);
+    expect(paths).toEqual(bilateralWebRTC);
+
+    const evidence = {
+      schemaVersion: 1,
+      scope: "same-host Chromium two-context smoke",
+      physicalGate2: false,
+      appSHA: hostAppSHA,
+      forkSHA,
+      payload: {
+        bytes: payloadBytes,
+        sha256: digest,
+      },
+      webRTC: {
+        senderTxBytes: senderWebRTCTxDelta,
+        receiverRxBytes: receiverWebRTCRxDelta,
+        senderBufferCurrentBytes: senderDiagnosticsAfter.dataChannelBufferedBytes,
+        senderBufferPeakBytes: senderDiagnosticsAfter.dataChannelPeakBufferedBytes,
+        receiverBufferCurrentBytes: receiverDiagnosticsAfter.dataChannelBufferedBytes,
+        receiverBufferPeakBytes: receiverDiagnosticsAfter.dataChannelPeakBufferedBytes,
+      },
+      derp: {
+        baselineBytes: derpBaselineBytes,
+        transferBytes: derpDelta,
+        transferFraction: derpFraction,
+        matchedSocketCounts: derpBefore.map((snapshot) => snapshot.matchedSocketCount),
+      },
+      paths,
+    };
+    await testInfo.attach("sanitized-webrtc-gate2-evidence.json", {
+      body: Buffer.from(`${JSON.stringify(evidence, null, 2)}\n`, "utf8"),
+      contentType: "application/json",
+    });
   } finally {
     await Promise.allSettled([hostMeter?.close(), guestMeter?.close()]);
     await Promise.allSettled([hostContext?.close(), guestContext?.close()]);
