@@ -20,6 +20,93 @@ async function sendText(page, text) {
   await page.locator("#send-text-btn").click();
 }
 
+async function installInviteSinks(page) {
+  await page.evaluate(() => {
+    globalThis.__inviteEffects = { copied: "", shared: null };
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        async writeText(value) {
+          globalThis.__inviteEffects.copied = String(value);
+        },
+      },
+    });
+    Object.defineProperty(navigator, "share", {
+      configurable: true,
+      value: async (details) => {
+        globalThis.__inviteEffects.shared = { ...details };
+      },
+    });
+  });
+}
+
+async function qrMatches(page, expectedURL) {
+  return page.evaluate(async (value) => {
+    const { encode } = await import("/vendor/uqr.js");
+    const expected = encode(value, { ecc: "M", border: 4 });
+    const canvas = document.getElementById("qr-canvas");
+    const scale = Math.max(2, Math.floor(512 / expected.size));
+    if (canvas.width !== expected.size * scale || canvas.height !== expected.size * scale) return false;
+    const pixels = canvas.getContext("2d", { alpha: false }).getImageData(
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    ).data;
+    for (let y = 0; y < expected.size; y += 1) {
+      for (let x = 0; x < expected.size; x += 1) {
+        const sampleX = x * scale + Math.floor(scale / 2);
+        const sampleY = y * scale + Math.floor(scale / 2);
+        const offset = (sampleY * canvas.width + sampleX) * 4;
+        const black = pixels[offset] < 128 && pixels[offset + 1] < 128 && pixels[offset + 2] < 128;
+        if (black !== Boolean(expected.data[y][x])) return false;
+      }
+    }
+    return true;
+  }, expectedURL);
+}
+
+test("keeps lab invitations on the protected preview origin for copy, share, and QR", async ({ browser }) => {
+  test.skip(!experimentalBuild, "requires the WebRTC-tagged WASM artifact");
+  const context = await browser.newContext({ locale: "en-US" });
+  try {
+    const host = await openMockPage(context, randomUUID(), { webRTCLab: true });
+    const address = await startMockRoom(host);
+    const previewOrigin = new URL(host.url()).origin;
+    const expectedURL = `${previewOrigin}/#${new URLSearchParams({ v: "1", invite: address })}`;
+    await installInviteSinks(host);
+
+    await host.locator("#copy-invite").click();
+    await expect.poll(() => host.evaluate(() => globalThis.__inviteEffects.copied)).toBe(expectedURL);
+    // The native-share control is intentionally mobile-only; invoke the same
+    // DOM activation handler here while retaining the deterministic desktop
+    // transport fixture used by the rest of this suite.
+    await host.locator("#share-invite").evaluate((button) => button.click());
+    await expect.poll(() => host.evaluate(() => globalThis.__inviteEffects.shared?.url)).toBe(expectedURL);
+    await host.locator("#show-qr").click();
+    await expect(host.locator("#qr-dialog")).toBeVisible();
+    expect(await qrMatches(host, expectedURL)).toBe(true);
+
+    const requestedURLs = [];
+    const joiner = await context.newPage();
+    await joiner.addInitScript(() => {
+      // Keep this page in the deterministic unsupported state: fragment
+      // consumption happens before browser admission or any transport starts.
+      Object.defineProperty(globalThis, "DecompressionStream", {
+        configurable: true,
+        value: undefined,
+      });
+    });
+    joiner.on("request", (request) => requestedURLs.push(request.url()));
+    await joiner.goto(expectedURL);
+    await joiner.waitForFunction(() => location.hash === "" && globalThis.tcTest?.inviteConsumed === true);
+    expect(await joiner.evaluate(() => globalThis.tcTest.inviteConsumed)).toBe(true);
+    expect(requestedURLs.every((url) => !url.includes("#") && !url.includes(address))).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
 test("reuses one persistent peer client across control and message ports, then closes it", async ({ browser }) => {
   test.skip(!experimentalBuild, "requires the WebRTC-tagged WASM artifact");
   const context = await browser.newContext({ locale: "en-US" });
@@ -240,6 +327,11 @@ test("the normal-build kill switch suppresses the experiment and uses legacy DER
     expect(await host.evaluate(() => globalThis.tcTest.runtime.magicsockWebRTC)).toBe(false);
 
     const address = await startMockRoom(host);
+    await installInviteSinks(host);
+    await host.locator("#copy-invite").click();
+    await expect.poll(() => host.evaluate(() => globalThis.__inviteEffects.copied)).toBe(
+      `https://tailcat.app/#${new URLSearchParams({ v: "1", invite: address })}`,
+    );
     await connectMockPeer(guest, address);
     await sendText(guest, "kill switch fallback");
     await expect(host.locator(".message:not(.mine)", { hasText: "kill switch fallback" })).toHaveCount(1);
