@@ -294,7 +294,11 @@ test("falls back to a temporary room without IndexedDB and copies when Web Share
     });
   });
   await page.locator("#share-invite").click();
-  await expect.poll(() => page.evaluate(() => globalThis.__copiedMobileInvite || "")).toContain("https://tailcat.app/#v=1&invite=tc");
+  const expectedInviteOrigin = await page.evaluate(() => (
+    globalThis.__TAILCAT_WEBRTC_LAB__ === true ? location.origin : "https://tailcat.app"
+  ));
+  await expect.poll(() => page.evaluate(() => globalThis.__copiedMobileInvite || ""))
+    .toContain(`${expectedInviteOrigin}/#v=1&invite=tc`);
 
   await page.locator("#stop-listen-btn").click();
   await expect.poll(() => page.evaluate(() => globalThis.tcTest.state.room)).toBe("closed");

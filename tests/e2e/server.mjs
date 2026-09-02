@@ -44,10 +44,22 @@ function matches(pattern, pathname) {
   return pattern === pathname;
 }
 
+function localFixtureHeader(name, value) {
+  if (name.toLowerCase() !== "content-security-policy") return value;
+  // Production is HTTPS and must keep upgrade-insecure-requests. This server
+  // is an explicitly loopback-only HTTP fixture; WebKit otherwise upgrades
+  // its relative subresources to HTTPS and fails them before app code runs.
+  return value
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter((directive) => directive.toLowerCase() !== "upgrade-insecure-requests")
+    .join("; ");
+}
+
 function applyConfiguredHeaders(response, pathname) {
   for (const rule of headerRules) {
     if (!matches(rule.pattern, pathname)) continue;
-    for (const [name, value] of rule.set) response.setHeader(name, value);
+    for (const [name, value] of rule.set) response.setHeader(name, localFixtureHeader(name, value));
     for (const name of rule.remove) response.removeHeader(name);
   }
 }

@@ -9,6 +9,7 @@ test("publishes the production security and compressed-WASM headers", async ({ r
   expect(configured).toContain("frame-ancestors 'none'");
   expect(configured).toContain("script-src 'self' 'wasm-unsafe-eval'");
   expect(configured).toContain("worker-src 'self' blob:");
+  expect(configured).toContain("upgrade-insecure-requests");
   expect(configured).toContain("X-Robots-Tag: noindex, nofollow, noarchive");
   expect(configured).toMatch(/\/main\.wasm\.gz\s+[\s\S]*Content-Type: application\/gzip/u);
   expect(configured).toMatch(/\/main\.wasm\.gz\s+[\s\S]*! Content-Encoding/u);
@@ -18,6 +19,7 @@ test("publishes the production security and compressed-WASM headers", async ({ r
   expect(home.headers()["content-security-policy"]).toContain("default-src 'self'");
   expect(home.headers()["content-security-policy"]).toContain("wss://*.ipn.dev");
   expect(home.headers()["content-security-policy"]).toContain("https://*.ipn.dev");
+  expect(home.headers()["content-security-policy"]).not.toContain("upgrade-insecure-requests");
   expect(home.headers()["x-robots-tag"]).toContain("noindex");
   expect(home.headers()["x-frame-options"]).toBe("DENY");
   expect(home.headers()["referrer-policy"]).toBe("no-referrer");
