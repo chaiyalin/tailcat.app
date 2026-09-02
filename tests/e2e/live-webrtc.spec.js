@@ -1,10 +1,197 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { installMockSavePicker } from "./mock-tailcat.js";
 
 // A failed live run must not persist a trace or screenshot containing the
 // one-time room address. The test reports only the app's sanitized path enum.
 test.use({ trace: "off", screenshot: "off", video: "off" });
+
+const cloudflareSTUNURL = "stun:stun.cloudflare.com:3478";
+const bilateralWebRTC = Object.freeze([
+  Object.freeze({ local: "webrtc", peer: "webrtc", bilateral: "webrtc" }),
+  Object.freeze({ local: "webrtc", peer: "webrtc", bilateral: "webrtc" }),
+]);
+
+async function assertExperimentalRuntime(page) {
+  const runtime = await page.evaluate((expectedSTUNURL) => {
+    const transport = globalThis.tcTest?.runtime?.transportConfiguration;
+    return {
+      labBuild: globalThis.__TAILCAT_WEBRTC_LAB__ === true,
+      mockTransport: Boolean(globalThis.tcTest?.mockTransport || globalThis.__mockTailcat),
+      compiled: transport?.compiled === true,
+      enabled: transport?.enabled === true,
+      exactSTUN: Array.isArray(transport?.stunURLs)
+        && transport.stunURLs.length === 1
+        && transport.stunURLs[0] === expectedSTUNURL,
+    };
+  }, cloudflareSTUNURL);
+  expect(runtime).toEqual({
+    labBuild: true,
+    mockTransport: false,
+    compiled: true,
+    enabled: true,
+    exactSTUN: true,
+  });
+}
+
+async function installDiagnosticsCapture(page) {
+  await page.evaluate(() => {
+    const connect = globalThis.tailcatConnect;
+    if (typeof connect !== "function") throw new Error("persistent Tailcat client API is unavailable");
+    let readLatest = null;
+    globalThis.tailcatConnect = async function captureDiagnostics(...args) {
+      const client = await connect.apply(this, args);
+      if (typeof client?.diagnostics !== "function") {
+        client?.close?.();
+        throw new Error("experimental client diagnostics API is unavailable");
+      }
+      readLatest = client.diagnostics.bind(client);
+      return client;
+    };
+    Object.defineProperty(globalThis, "__readLiveWebRTCDiagnostics", {
+      configurable: true,
+      value: () => {
+        if (!readLatest) throw new Error("persistent client diagnostics are not ready");
+        return readLatest();
+      },
+    });
+  });
+}
+
+async function readNumericDiagnostics(page) {
+  return page.evaluate(() => {
+    const read = globalThis.__readLiveWebRTCDiagnostics;
+    if (typeof read !== "function") throw new Error("diagnostics capture is unavailable");
+    const raw = read();
+    const result = {
+      webRTCTxBytes: raw?.webRTCTxBytes,
+      webRTCRxBytes: raw?.webRTCRxBytes,
+      dataChannelBufferedBytes: raw?.dataChannelBufferedBytes,
+      dataChannelPeakBufferedBytes: raw?.dataChannelPeakBufferedBytes,
+    };
+    if (!Object.values(result).every((value) => Number.isSafeInteger(value) && value >= 0)) {
+      throw new Error("diagnostics snapshot is not a set of safe non-negative integers");
+    }
+    return result;
+  });
+}
+
+async function readSanitizedPaths(pages) {
+  return Promise.all(pages.map((page) => page.evaluate(() => ({
+    local: globalThis.tcTest.state.localPath,
+    peer: globalThis.tcTest.state.peerPath,
+    bilateral: globalThis.tcTest.state.bilateralPath,
+  }))));
+}
+
+async function connectTokyoPair(host, guest) {
+  await Promise.all([
+    host.locator("#region-select").selectOption("tok"),
+    guest.locator("#region-select").selectOption("tok"),
+  ]);
+  await host.locator("#listen-btn").click();
+  await expect.poll(
+    () => host.evaluate(() => globalThis.tcTest.state.room),
+    { timeout: 60_000 },
+  ).toBe("open");
+
+  let address = await host.locator("#listen-addr").textContent();
+  if (!/^tc\S{32,}$/u.test(address || "")) {
+    throw new Error("host did not create a valid Tailcat room address");
+  }
+  await guest.evaluate((roomAddress) => {
+    const input = document.querySelector("#send-addr");
+    if (!(input instanceof HTMLInputElement)) throw new Error("room address input is unavailable");
+    input.value = roomAddress;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, address);
+  address = "";
+  await guest.locator("#connect-btn").click();
+  await expect.poll(
+    () => guest.evaluate(() => globalThis.tcTest.state.peer),
+    { timeout: 240_000 },
+  ).toBe("connected");
+  await expect.poll(
+    () => host.evaluate(() => globalThis.tcTest.state.peer),
+    { timeout: 60_000 },
+  ).toBe("connected");
+}
+
+async function waitForBilateralWebRTC(host, guest) {
+  await expect.poll(() => readSanitizedPaths([host, guest]), {
+    timeout: 60_000,
+    message: "both pages should authenticate a bilateral WebRTC path",
+  }).toEqual(bilateralWebRTC);
+}
+
+function numericDelta(after, before, key) {
+  const delta = after[key] - before[key];
+  if (!Number.isSafeInteger(delta) || delta < 0) {
+    throw new Error("a numeric transport counter regressed");
+  }
+  return delta;
+}
+
+function webSocketPayloadByteLength(frame) {
+  const payload = frame?.payloadData;
+  if (typeof payload !== "string") return 0;
+  if (frame.opcode === 1) return Buffer.byteLength(payload, "utf8");
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(payload.length * 3 / 4) - padding);
+}
+
+function isIPNDevWebSocket(rawURL) {
+  try {
+    const parsed = new URL(rawURL);
+    return parsed.protocol === "wss:"
+      && parsed.hostname.length > ".ipn.dev".length
+      && parsed.hostname.endsWith(".ipn.dev");
+  } catch (_) {
+    return false;
+  }
+}
+
+async function attachDERPWebSocketMeter(context, page) {
+  const session = await context.newCDPSession(page);
+  const trackedSockets = new Map();
+  let sentBytes = 0;
+  let receivedBytes = 0;
+
+  session.on("Network.webSocketCreated", ({ requestId, url }) => {
+    // Persist only a request identifier and a classification bit. The URL is
+    // inspected on this stack frame and is never retained or reported.
+    trackedSockets.set(requestId, isIPNDevWebSocket(url));
+  });
+  session.on("Network.webSocketClosed", ({ requestId }) => {
+    trackedSockets.delete(requestId);
+  });
+  session.on("Network.webSocketFrameSent", ({ requestId, response }) => {
+    if (trackedSockets.get(requestId) === true) sentBytes += webSocketPayloadByteLength(response);
+  });
+  session.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
+    if (trackedSockets.get(requestId) === true) receivedBytes += webSocketPayloadByteLength(response);
+  });
+  await session.send("Network.enable");
+
+  return {
+    snapshot: () => Object.freeze({ sentBytes, receivedBytes }),
+    close: async () => {
+      trackedSockets.clear();
+      await session.detach();
+    },
+  };
+}
+
+function combinedDERPDelta(after, before) {
+  return after.reduce((total, snapshot, index) => (
+    total
+      + numericDelta(snapshot, before[index], "sentBytes")
+      + numericDelta(snapshot, before[index], "receivedBytes")
+  ), 0);
+}
 
 test("live WebRTC upgrades both peers and transfers verified data", async ({ browser }) => {
   test.skip(process.env.LIVE_WEBRTC !== "1", "live WebRTC smoke test is opt-in");
@@ -20,68 +207,16 @@ test("live WebRTC upgrades both peers and transfers verified data", async ({ bro
       guest.waitForFunction(() => globalThis.tcTest?.ready === true),
     ]);
 
-    for (const page of [host, guest]) {
-      const runtime = await page.evaluate(() => ({
-        labBuild: globalThis.__TAILCAT_WEBRTC_LAB__ === true,
-        mockTransport: Boolean(globalThis.tcTest?.mockTransport || globalThis.__mockTailcat),
-        transport: globalThis.tcTest?.runtime?.transportConfiguration || null,
-      }));
-      expect(runtime).toEqual({
-        labBuild: true,
-        mockTransport: false,
-        transport: {
-          compiled: true,
-          enabled: true,
-          stunURLs: ["stun:stun.cloudflare.com:3478"],
-        },
-      });
-    }
+    await Promise.all([host, guest].map(async (page) => {
+      await assertExperimentalRuntime(page);
+      await installDiagnosticsCapture(page);
+    }));
 
     // The picker fixture only captures locally written bytes. Tailcat,
     // magicsock, DERP, ICE, and WebRTC remain the real WASM implementations.
     await installMockSavePicker(host);
-    await Promise.all([
-      host.locator("#region-select").selectOption("tok"),
-      guest.locator("#region-select").selectOption("tok"),
-    ]);
-    await host.locator("#listen-btn").click();
-    await expect.poll(
-      () => host.evaluate(() => globalThis.tcTest.state.room),
-      { timeout: 60_000 },
-    ).toBe("open");
-
-    const address = await host.locator("#listen-addr").textContent();
-    if (!/^tc\S{32,}$/u.test(address || "")) {
-      throw new Error("host did not create a valid Tailcat room address");
-    }
-    await guest.evaluate((roomAddress) => {
-      const input = document.querySelector("#send-addr");
-      if (!(input instanceof HTMLInputElement)) throw new Error("room address input is unavailable");
-      input.value = roomAddress;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    }, address);
-    await guest.locator("#connect-btn").click();
-    await expect.poll(
-      () => guest.evaluate(() => globalThis.tcTest.state.peer),
-      { timeout: 240_000 },
-    ).toBe("connected");
-    await expect.poll(
-      () => host.evaluate(() => globalThis.tcTest.state.peer),
-      { timeout: 60_000 },
-    ).toBe("connected");
-
-    const sanitizedPaths = async () => Promise.all([host, guest].map((page) => page.evaluate(() => ({
-      local: globalThis.tcTest.state.localPath,
-      peer: globalThis.tcTest.state.peerPath,
-      bilateral: globalThis.tcTest.state.bilateralPath,
-    }))));
-    await expect.poll(sanitizedPaths, {
-      timeout: 60_000,
-      message: "both pages should authenticate a bilateral WebRTC path",
-    }).toEqual([
-      { local: "webrtc", peer: "webrtc", bilateral: "webrtc" },
-      { local: "webrtc", peer: "webrtc", bilateral: "webrtc" },
-    ]);
+    await connectTokyoPair(host, guest);
+    await waitForBilateralWebRTC(host, guest);
 
     const guestText = `live WebRTC guest message ${Date.now()}`;
     await guest.locator("#send-text").fill(guestText);
@@ -96,13 +231,17 @@ test("live WebRTC upgrades both peers and transfers verified data", async ({ bro
     const bytes = Buffer.alloc(64 * 1024 + 1);
     for (let index = 0; index < bytes.length; index += 1) bytes[index] = index % 251;
     const digest = createHash("sha256").update(bytes).digest("hex");
-    const fileName = "live-webrtc-64k-plus-one.bin";
+    const [senderDiagnosticsBefore, receiverDiagnosticsBefore] = await Promise.all([
+      readNumericDiagnostics(guest),
+      readNumericDiagnostics(host),
+    ]);
+    const offerCount = await host.locator(".incoming-transfer").count();
     await guest.locator("#send-file").setInputFiles({
-      name: fileName,
+      name: "payload.bin",
       mimeType: "application/octet-stream",
       buffer: bytes,
     });
-    const offer = host.locator(".incoming-transfer", { hasText: fileName });
+    const offer = host.locator(".incoming-transfer").nth(offerCount);
     await expect(offer).toBeVisible({ timeout: 90_000 });
     await offer.locator(".save-file").click();
 
@@ -128,14 +267,127 @@ test("live WebRTC upgrades both peers and transfers verified data", async ({ bro
       closed: true,
       aborted: false,
     }));
+    const [senderDiagnosticsAfter, receiverDiagnosticsAfter] = await Promise.all([
+      readNumericDiagnostics(guest),
+      readNumericDiagnostics(host),
+    ]);
+    expect(numericDelta(senderDiagnosticsAfter, senderDiagnosticsBefore, "webRTCTxBytes"))
+      .toBeGreaterThanOrEqual(bytes.length);
+    expect(numericDelta(receiverDiagnosticsAfter, receiverDiagnosticsBefore, "webRTCRxBytes"))
+      .toBeGreaterThanOrEqual(bytes.length);
 
     // The application protocol traffic must not have replaced or downgraded
     // the authenticated path after the transfer.
-    expect(await sanitizedPaths()).toEqual([
-      { local: "webrtc", peer: "webrtc", bilateral: "webrtc" },
-      { local: "webrtc", peer: "webrtc", bilateral: "webrtc" },
-    ]);
+    expect(await readSanitizedPaths([host, guest])).toEqual(bilateralWebRTC);
   } finally {
     await context.close();
+  }
+});
+
+test("live WebRTC Gate 2 keeps a verified 100 MiB transfer off DERP", async ({ browser }, testInfo) => {
+  test.skip(process.env.LIVE_WEBRTC_GATE2 !== "1", "live WebRTC Gate 2 evidence is opt-in");
+  test.skip(testInfo.project.name !== "chrome", "live WebRTC Gate 2 uses Chromium CDP counters");
+  test.setTimeout(900_000);
+
+  const payloadBytes = 100 * 1024 * 1024;
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "tc-webrtc-g2-"));
+  const payloadPath = join(temporaryDirectory, "payload.bin");
+  let hostContext;
+  let guestContext;
+  let hostMeter;
+  let guestMeter;
+  try {
+    let payload = Buffer.alloc(payloadBytes, 0x3c);
+    const digest = createHash("sha256").update(payload).digest("hex");
+    await writeFile(payloadPath, payload);
+    payload = null;
+
+    hostContext = await browser.newContext({ locale: "en-US" });
+    guestContext = await browser.newContext({ locale: "en-US" });
+    const host = await hostContext.newPage();
+    const guest = await guestContext.newPage();
+    [hostMeter, guestMeter] = await Promise.all([
+      attachDERPWebSocketMeter(hostContext, host),
+      attachDERPWebSocketMeter(guestContext, guest),
+    ]);
+    await Promise.all([host.goto("/"), guest.goto("/")]);
+    await Promise.all([
+      host.waitForFunction(() => globalThis.tcTest?.ready === true),
+      guest.waitForFunction(() => globalThis.tcTest?.ready === true),
+    ]);
+    await Promise.all([host, guest].map(async (page) => {
+      await assertExperimentalRuntime(page);
+      await installDiagnosticsCapture(page);
+    }));
+
+    await installMockSavePicker(host);
+    await connectTokyoPair(host, guest);
+    await waitForBilateralWebRTC(host, guest);
+
+    const offerCount = await host.locator(".incoming-transfer").count();
+    // These identity-free counters are captured after the authenticated path
+    // is WebRTC and directly before the file picker starts the transfer.
+    const [senderDiagnosticsBefore, receiverDiagnosticsBefore] = await Promise.all([
+      readNumericDiagnostics(guest),
+      readNumericDiagnostics(host),
+    ]);
+    const derpBefore = [hostMeter.snapshot(), guestMeter.snapshot()];
+
+    await guest.locator("#send-file").setInputFiles(payloadPath);
+    const offer = host.locator(".incoming-transfer").nth(offerCount);
+    await expect(offer).toBeVisible({ timeout: 120_000 });
+    await offer.locator(".save-file").click();
+    await expect.poll(
+      () => guest.evaluate(() => globalThis.tcTest.sendDone),
+      { timeout: 600_000 },
+    ).toBe(true);
+    await expect.poll(
+      () => host.evaluate(() => globalThis.tcTest.recvDone),
+      { timeout: 600_000 },
+    ).toBe(true);
+
+    expect(await guest.evaluate(() => ({
+      bytes: globalThis.tcTest.sentBytes,
+      digest: globalThis.tcTest.sentSha256,
+    }))).toEqual({ bytes: payloadBytes, digest });
+    expect(await host.evaluate(() => ({
+      bytes: globalThis.tcTest.recvBytes,
+      digest: globalThis.tcTest.recvSha256,
+    }))).toEqual({ bytes: payloadBytes, digest });
+    expect(await host.evaluate(() => ({
+      totalBytes: globalThis.__mockSave?.totalBytes,
+      closed: globalThis.__mockSave?.closed,
+      aborted: globalThis.__mockSave?.aborted,
+    }))).toEqual({ totalBytes: payloadBytes, closed: true, aborted: false });
+
+    // Let Network-domain events already emitted by the browser drain to the
+    // test process before taking the terminal numeric snapshot.
+    await host.waitForTimeout(250);
+    const [senderDiagnosticsAfter, receiverDiagnosticsAfter] = await Promise.all([
+      readNumericDiagnostics(guest),
+      readNumericDiagnostics(host),
+    ]);
+    const senderWebRTCTxDelta = numericDelta(
+      senderDiagnosticsAfter,
+      senderDiagnosticsBefore,
+      "webRTCTxBytes",
+    );
+    const receiverWebRTCRxDelta = numericDelta(
+      receiverDiagnosticsAfter,
+      receiverDiagnosticsBefore,
+      "webRTCRxBytes",
+    );
+    expect(senderWebRTCTxDelta).toBeGreaterThanOrEqual(payloadBytes);
+    expect(receiverWebRTCRxDelta).toBeGreaterThanOrEqual(payloadBytes);
+
+    const derpAfter = [hostMeter.snapshot(), guestMeter.snapshot()];
+    const derpDelta = combinedDERPDelta(derpAfter, derpBefore);
+    expect(derpDelta, "combined DERP WebSocket payload bytes").toBeLessThan(2 * 1024 * 1024);
+    expect(derpDelta / payloadBytes, "combined DERP fraction").toBeLessThan(0.02);
+    expect(await readSanitizedPaths([host, guest])).toEqual(bilateralWebRTC);
+  } finally {
+    await Promise.allSettled([hostMeter?.close(), guestMeter?.close()]);
+    await Promise.allSettled([hostContext?.close(), guestContext?.close()]);
+    await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
