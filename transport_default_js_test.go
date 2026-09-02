@@ -21,12 +21,14 @@ func TestDefaultBuildTransportConfiguration(t *testing.T) {
 	if webRTC.Get("compiled").Bool() || webRTC.Get("enabled").Bool() {
 		t.Fatal("default build reported WebRTC compiled or enabled")
 	}
-	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{disabled}))); err != nil {
-		t.Fatalf("identical transport configuration was not idempotent: %v", err)
+	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{disabled}))); err == nil {
+		t.Fatal("identical second transport configuration succeeded")
 	}
-	markTransportStarted()
-	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{disabled}))); err != nil {
-		t.Fatalf("identical configuration after start was not idempotent: %v", err)
+	if err := markTransportStarted(); err != nil {
+		t.Fatalf("start after successful configuration: %v", err)
+	}
+	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{disabled}))); err == nil {
+		t.Fatal("identical transport configuration after start succeeded")
 	}
 	different := transportOptions(false)
 	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{different}))); err == nil {
@@ -42,10 +44,29 @@ func TestDefaultBuildTransportConfiguration(t *testing.T) {
 
 func TestTransportConfigurationFreezesOnStart(t *testing.T) {
 	resetTransportState(t)
-	markTransportStarted()
+	if err := markTransportStarted(); err == nil {
+		t.Fatal("transport started without configuration")
+	}
 	opts := transportOptions(false)
 	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{opts}))); err == nil {
 		t.Fatal("transport configuration after start succeeded")
+	}
+}
+
+func TestInvalidConfigurationCannotPermitLateStart(t *testing.T) {
+	resetTransportState(t)
+	invalid := transportOptions(false, "stun:stun.example.invalid:3478")
+	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{invalid}))); err == nil {
+		t.Fatal("invalid transport configuration succeeded")
+	}
+	clientOptions := js.Global().Get("Object").New()
+	clientOptions.Set("addr", "tc-invalid-for-config-test")
+	if _, err := awaitPromise(js.ValueOf(tailcatConnect(js.Undefined(), []js.Value{clientOptions}))); err == nil {
+		t.Fatal("Tailcat client started after invalid configuration")
+	}
+	valid := transportOptions(false)
+	if _, err := awaitPromise(js.ValueOf(tailcatConfigureTransport(js.Undefined(), []js.Value{valid}))); err == nil {
+		t.Fatal("late valid transport configuration succeeded")
 	}
 }
 

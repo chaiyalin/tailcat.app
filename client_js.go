@@ -37,22 +37,32 @@ type sessionClient interface {
 	Close() error
 }
 
+type initializingSessionClient interface {
+	sessionClient
+	Ping(context.Context) (tailcat.PingResult, error)
+}
+
 type clientOptions struct {
-	addr       string
-	derpMapURL string
-	keyJSON    string
-	logf       logger.Logf
+	addr        string
+	derpMapURL  string
+	keyJSON     string
+	logf        logger.Logf
+	abortSignal js.Value
 }
 
 func parseClientOptions(opts js.Value) (clientOptions, error) {
 	o := clientOptions{
-		addr:       optString(opts, "addr"),
-		derpMapURL: optString(opts, "derpMapURL"),
-		keyJSON:    optString(opts, "privateKey"),
-		logf:       optLogf(opts),
+		addr:        optString(opts, "addr"),
+		derpMapURL:  optString(opts, "derpMapURL"),
+		keyJSON:     optString(opts, "privateKey"),
+		logf:        optLogf(opts),
+		abortSignal: opts.Get("signal"),
 	}
 	if o.addr == "" {
 		return clientOptions{}, errors.New("addr is required")
+	}
+	if err := validateAbortSignal(o.abortSignal); err != nil {
+		return clientOptions{}, err
 	}
 	return o, nil
 }
@@ -82,6 +92,9 @@ func (o clientOptions) newClient() (*tailcat.Client, error) {
 //	const status = await client.status({timeoutMs: 5000})
 //	client.close()
 //
+// options.signal may be an AbortSignal. Aborting it rejects initialization and
+// closes the partially started Tailcat client before this Promise resolves.
+//
 // At most maxSessionStreams streams may be active or dialing at once.
 func tailcatConnect(this js.Value, args []js.Value) any {
 	if len(args) != 1 || args[0].Type() != js.TypeObject {
@@ -91,20 +104,109 @@ func tailcatConnect(this js.Value, args []js.Value) any {
 	if err != nil {
 		return rejectedPromise(err)
 	}
+	parent, releaseAbort, err := contextWithAbortSignal(context.Background(), opts.abortSignal)
+	if err != nil {
+		return rejectedPromise(err)
+	}
 	return makePromise(func() (any, error) {
+		defer releaseAbort()
 		cl, err := opts.newClient()
 		if err != nil {
 			return nil, err
 		}
-		markTransportStarted()
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if err := pingUntil(ctx, cl); err != nil {
+		if err := markTransportStarted(); err != nil {
 			_ = cl.Close()
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+		defer cancel()
+		if err := initializeSessionClient(ctx, cl); err != nil {
 			return nil, err
 		}
 		return newJSSession(cl), nil
 	})
+}
+
+// validateAbortSignal accepts a standard AbortSignal or no signal. It uses a
+// structural check so signals created in another same-origin realm still work.
+func validateAbortSignal(signal js.Value) error {
+	if signal.Type() == js.TypeUndefined || signal.Type() == js.TypeNull {
+		return nil
+	}
+	if signal.Type() != js.TypeObject ||
+		signal.Get("aborted").Type() != js.TypeBoolean ||
+		signal.Get("addEventListener").Type() != js.TypeFunction ||
+		signal.Get("removeEventListener").Type() != js.TypeFunction {
+		return errors.New("signal must be an AbortSignal")
+	}
+	return nil
+}
+
+// contextWithAbortSignal connects a JavaScript AbortSignal to a Go context.
+// cleanup removes and releases the Go callback and must always be called.
+func contextWithAbortSignal(parent context.Context, signal js.Value) (ctx context.Context, cleanup func(), err error) {
+	ctx, cancel := context.WithCancel(parent)
+	if signal.Type() == js.TypeUndefined || signal.Type() == js.TypeNull {
+		return ctx, cancel, nil
+	}
+	if err := validateAbortSignal(signal); err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	if signal.Get("aborted").Bool() {
+		cancel()
+		return ctx, cancel, nil
+	}
+
+	abort := js.FuncOf(func(this js.Value, args []js.Value) any {
+		cancel()
+		return nil
+	})
+	if err := callAbortSignalMethod(signal, "addEventListener", "abort", abort); err != nil {
+		abort.Release()
+		cancel()
+		return nil, nil, err
+	}
+	var once sync.Once
+	cleanup = func() {
+		once.Do(func() {
+			_ = callAbortSignalMethod(signal, "removeEventListener", "abort", abort)
+			abort.Release()
+			cancel()
+		})
+	}
+	// Close the check/register race: an abort between the first aborted read and
+	// addEventListener is observed here even if the browser did not queue it.
+	if signal.Get("aborted").Bool() {
+		cancel()
+	}
+	return ctx, cleanup, nil
+}
+
+func callAbortSignalMethod(signal js.Value, method string, args ...any) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("signal.%s failed: %v", method, recovered)
+		}
+	}()
+	signal.Call(method, args...)
+	return nil
+}
+
+func initializeSessionClient(ctx context.Context, cl initializingSessionClient) error {
+	if err := ctx.Err(); err != nil {
+		_ = cl.Close()
+		return fmt.Errorf("initializing Tailcat client: %w", err)
+	}
+	if err := pingUntil(ctx, cl); err != nil {
+		_ = cl.Close()
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = cl.Close()
+		return fmt.Errorf("initializing Tailcat client: %w", err)
+	}
+	return nil
 }
 
 type jsSession struct {
@@ -113,13 +215,13 @@ type jsSession struct {
 	closed      bool
 	pending     int
 	nextID      uint64
-	connections map[uint64]net.Conn
+	connections map[uint64]func()
 }
 
 func newJSSession(client sessionClient) js.Value {
 	s := &jsSession{
 		client:      client,
-		connections: make(map[uint64]net.Conn),
+		connections: make(map[uint64]func()),
 	}
 	object := js.Global().Get("Object").New()
 	promise := js.Global().Get("Promise")
@@ -165,12 +267,18 @@ func newJSSession(client sessionClient) js.Value {
 				s.finishFailedDial()
 				return nil, errors.New("DialTCPPort returned no connection")
 			}
-			id, err := s.finishSuccessfulDial(conn)
+			var id uint64
+			connection, closeConnection := makeJSConnWithClose(conn, port, func() {
+				if id != 0 {
+					s.releaseConnection(id)
+				}
+			})
+			id, err = s.finishSuccessfulDial(closeConnection)
 			if err != nil {
-				_ = conn.Close()
+				closeConnection()
 				return nil, err
 			}
-			return makeJSConn(conn, port, func() { s.releaseConnection(id) }), nil
+			return connection, nil
 		})
 	})
 	statusFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -241,7 +349,7 @@ func (s *jsSession) finishFailedDial() {
 	s.mu.Unlock()
 }
 
-func (s *jsSession) finishSuccessfulDial(conn net.Conn) (uint64, error) {
+func (s *jsSession) finishSuccessfulDial(closeConnection func()) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pending > 0 {
@@ -252,7 +360,7 @@ func (s *jsSession) finishSuccessfulDial(conn net.Conn) (uint64, error) {
 	}
 	s.nextID++
 	id := s.nextID
-	s.connections[id] = conn
+	s.connections[id] = closeConnection
 	return id, nil
 }
 
@@ -281,8 +389,8 @@ func (s *jsSession) close() {
 	s.connections = nil
 	s.mu.Unlock()
 
-	for _, conn := range connections {
-		_ = conn.Close()
+	for _, closeConnection := range connections {
+		closeConnection()
 	}
 	if client != nil {
 		_ = client.Close()

@@ -39,6 +39,13 @@ func TestIncrementalSHA256(t *testing.T) {
 	}
 
 	h.Get("close").Invoke()
+	h.Get("close").Invoke()
+	if _, err := awaitPromise(h.Get("update").Invoke(chunk)); err == nil {
+		t.Fatal("update after close succeeded, want rejection")
+	}
+	if _, err := awaitPromise(h.Get("digestHex").Invoke()); err == nil {
+		t.Fatal("digestHex after close succeeded, want rejection")
+	}
 }
 
 func TestOptRegionID(t *testing.T) {
@@ -86,6 +93,15 @@ func TestJSConnWritesAllAndClosesIdempotently(t *testing.T) {
 	wrapped.Get("close").Invoke()
 	if !c.closed || closedCallbacks != 1 {
 		t.Fatalf("closed = %v, callbacks = %d; want true, 1", c.closed, closedCallbacks)
+	}
+	if _, err := awaitPromise(wrapped.Get("read").Invoke()); err == nil {
+		t.Fatal("read after close succeeded, want rejection")
+	}
+	if _, err := awaitPromise(wrapped.Get("write").Invoke(payload)); err == nil {
+		t.Fatal("write after close succeeded, want rejection")
+	}
+	if _, err := awaitPromise(wrapped.Get("closeWrite").Invoke()); err == nil {
+		t.Fatal("closeWrite after close succeeded, want rejection")
 	}
 }
 

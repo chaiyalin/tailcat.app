@@ -95,7 +95,9 @@ func tailcatListen(this js.Value, args []js.Value) any {
 			pk = tailcat.NewPrivateKey()
 			pk.Public.RegionID = -1 // auto-select
 		}
-		markTransportStarted()
+		if err := markTransportStarted(); err != nil {
+			return nil, err
+		}
 		if hasRequestedRegion {
 			// An explicit selection overrides the region stored with a
 			// remembered key while retaining the node identity.
@@ -141,34 +143,39 @@ func tailcatListen(this js.Value, args []js.Value) any {
 			srv.Close()
 			return nil, fmt.Errorf("Server.Start: %w", err)
 		}
-		// Keep close idempotent for the JavaScript API, but drop the heavy
-		// server reference after the first call. The small close callback can
-		// safely remain callable without retaining the netstack and OnTCP
-		// callback for every stopped/reopened room.
+		// Keep close idempotent for the JavaScript API and drop both the heavy
+		// server reference and the Go callback after the first call.
 		var (
 			closeOnce sync.Once
 			serverMu  sync.Mutex
 			server    = srv
 		)
-		return map[string]any{
-			"addr":           string(blob),
-			"privateKeyJSON": string(keyOut),
-			"regionID":       int(reg.RegionID),
-			"regionName":     reg.RegionName,
-			"regionCode":     reg.RegionCode,
-			"close": js.FuncOf(func(this js.Value, args []js.Value) any {
-				closeOnce.Do(func() {
-					serverMu.Lock()
-					current := server
-					server = nil
-					serverMu.Unlock()
-					if current != nil {
-						_ = current.Close()
-					}
-				})
-				return nil
-			}),
-		}, nil
+		object := js.Global().Get("Object").New()
+		var closeFunc js.Func
+		closeFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
+			closeOnce.Do(func() {
+				// Replace the Go callback before releasing it so close remains
+				// harmless and callable after the listener has stopped.
+				object.Set("close", js.Global().Get("Boolean"))
+				serverMu.Lock()
+				current := server
+				server = nil
+				serverMu.Unlock()
+				if current != nil {
+					_ = current.Close()
+				}
+				closeFunc.Release()
+				closeFunc = js.Func{}
+			})
+			return nil
+		})
+		object.Set("addr", string(blob))
+		object.Set("privateKeyJSON", string(keyOut))
+		object.Set("regionID", int(reg.RegionID))
+		object.Set("regionName", reg.RegionName)
+		object.Set("regionCode", reg.RegionCode)
+		object.Set("close", closeFunc)
+		return object, nil
 	})
 }
 
@@ -197,7 +204,16 @@ func tailcatNewSHA256(this js.Value, args []js.Value) any {
 		digest    string
 	)
 
-	var update, digestHex js.Func
+	object := js.Global().Get("Object").New()
+	promise := js.Global().Get("Promise")
+	closedOperation := promise.Get("reject").Call(
+		"bind",
+		promise,
+		js.Global().Get("Error").New("SHA-256 object is closed"),
+	)
+	closedClose := js.Global().Get("Boolean")
+
+	var update, digestHex, closeHash js.Func
 	update = js.FuncOf(func(this js.Value, args []js.Value) any {
 		if len(args) != 1 || !args[0].InstanceOf(js.Global().Get("Uint8Array")) {
 			return rejectedPromise(errors.New("update requires a Uint8Array"))
@@ -237,29 +253,30 @@ func tailcatNewSHA256(this js.Value, args []js.Value) any {
 	})
 
 	var releaseOnce sync.Once
-	closeHash := js.FuncOf(func(this js.Value, args []js.Value) any {
+	closeHash = js.FuncOf(func(this js.Value, args []js.Value) any {
 		mu.Lock()
 		closed = true
 		h = nil
 		digest = ""
 		mu.Unlock()
-		// The application never hashes after close. Release the hot-path
-		// callbacks so each completed file does not leave two registered Go
-		// functions behind. Keep only this tiny close callback for idempotence.
 		releaseOnce.Do(func() {
+			object.Set("update", closedOperation)
+			object.Set("digestHex", closedOperation)
+			object.Set("close", closedClose)
 			update.Release()
 			digestHex.Release()
+			closeHash.Release()
 			update = js.Func{}
 			digestHex = js.Func{}
+			closeHash = js.Func{}
 		})
 		return nil
 	})
 
-	return map[string]any{
-		"update":    update,
-		"digestHex": digestHex,
-		"close":     closeHash,
-	}
+	object.Set("update", update)
+	object.Set("digestHex", digestHex)
+	object.Set("close", closeHash)
+	return object
 }
 
 // tailcatDial connects to a tailcat server and dials one TCP stream
@@ -307,7 +324,10 @@ func tailcatDial(this js.Value, args []js.Value) any {
 			Logf:       logf,
 			DERPMapURL: derpMapURL,
 		}
-		markTransportStarted()
+		if err := markTransportStarted(); err != nil {
+			_ = cl.Close()
+			return nil, err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := pingUntil(ctx, cl); err != nil {
@@ -326,7 +346,9 @@ func tailcatDial(this js.Value, args []js.Value) any {
 // pingUntil retries the meow/meowed handshake until it succeeds or
 // ctx expires. The first pings can be lost while either side's DERP
 // connection is still coming up.
-func pingUntil(ctx context.Context, cl *tailcat.Client) error {
+func pingUntil(ctx context.Context, cl interface {
+	Ping(context.Context) (tailcat.PingResult, error)
+}) error {
 	for {
 		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		_, err := cl.Ping(pctx)
@@ -335,7 +357,7 @@ func pingUntil(ctx context.Context, cl *tailcat.Client) error {
 			return nil
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("ping: %w", err)
+			return fmt.Errorf("ping: %w", ctx.Err())
 		}
 	}
 }
@@ -354,7 +376,23 @@ func pingUntil(ctx context.Context, cl *tailcat.Client) error {
 // page asks for more, so a fast sender stalls on TCP backpressure
 // rather than filling browser memory.
 func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
+	value, _ := makeJSConnWithClose(c, port, onClose)
+	return value
+}
+
+// makeJSConnWithClose also returns the same idempotent close operation exposed
+// to JavaScript. Persistent sessions use it to release a stream's callbacks
+// even when the session, rather than application JavaScript, initiates close.
+func makeJSConnWithClose(c net.Conn, port uint16, onClose func()) (js.Value, func()) {
 	buf := make([]byte, 64<<10)
+	object := js.Global().Get("Object").New()
+	promise := js.Global().Get("Promise")
+	closedOperation := promise.Get("reject").Call(
+		"bind",
+		promise,
+		js.Global().Get("Error").New("connection is closed"),
+	)
+	closedClose := js.Global().Get("Boolean")
 	var (
 		closeOnce   sync.Once
 		releaseOnce sync.Once
@@ -366,6 +404,7 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 		readFunc    js.Func
 		writeFunc   js.Func
 		closeWFunc  js.Func
+		closeFunc   js.Func
 	)
 	currentConn := func() (net.Conn, error) {
 		connMu.Lock()
@@ -389,17 +428,19 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 			if after != nil {
 				after()
 			}
-			// read/write/closeWrite are invalid after close and can release
-			// their syscall/js registrations. The close callback remains so
-			// repeated close calls stay harmless, but it no longer retains the
-			// connection or Tailcat client through conn/cleanup.
 			releaseOnce.Do(func() {
+				object.Set("read", closedOperation)
+				object.Set("write", closedOperation)
+				object.Set("closeWrite", closedOperation)
+				object.Set("close", closedClose)
 				readFunc.Release()
 				writeFunc.Release()
 				closeWFunc.Release()
+				closeFunc.Release()
 				readFunc = js.Func{}
 				writeFunc = js.Func{}
 				closeWFunc = js.Func{}
+				closeFunc = js.Func{}
 			})
 		})
 	}
@@ -471,17 +512,16 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 			return js.Undefined(), nil
 		})
 	})
-	closeFunc := js.FuncOf(func(this js.Value, args []js.Value) any {
+	closeFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
 		closeConn()
 		return nil
 	})
-	return js.ValueOf(map[string]any{
-		"port":       int(port),
-		"read":       readFunc,
-		"write":      writeFunc,
-		"closeWrite": closeWFunc,
-		"close":      closeFunc,
-	})
+	object.Set("port", int(port))
+	object.Set("read", readFunc)
+	object.Set("write", writeFunc)
+	object.Set("closeWrite", closeWFunc)
+	object.Set("close", closeFunc)
+	return object, closeConn
 }
 
 func optString(v js.Value, name string) string {

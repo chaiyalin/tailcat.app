@@ -6,7 +6,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"sync"
 	"syscall/js"
 )
@@ -37,13 +36,7 @@ func tailcatConfigureTransport(this js.Value, args []js.Value) any {
 	transportState.Lock()
 	defer transportState.Unlock()
 	if transportState.configured {
-		if sameWebRTCTransportConfig(transportState.webRTC, config) {
-			return resolvedPromise(transportConfigSnapshot(config))
-		}
-		if transportState.started {
-			return rejectedPromise(errors.New("transport configuration is frozen after Tailcat starts"))
-		}
-		return rejectedPromise(errors.New("transport is already configured differently"))
+		return rejectedPromise(errors.New("transport is already configured"))
 	}
 	if transportState.started {
 		return rejectedPromise(errors.New("transport configuration is frozen after Tailcat starts"))
@@ -59,14 +52,18 @@ func tailcatConfigureTransport(this js.Value, args []js.Value) any {
 	return resolvedPromise(transportConfigSnapshot(config))
 }
 
-func sameWebRTCTransportConfig(a, b webRTCTransportConfig) bool {
-	return a.enabled == b.enabled && slices.Equal(a.stunURLs, b.stunURLs)
-}
-
-func markTransportStarted() {
+// markTransportStarted freezes transport configuration before any Tailcat
+// listener or client can begin network activity. Starting without a successful
+// configuration is a terminal error for this WASM instance: a later call may
+// not silently change transport policy underneath the attempted room.
+func markTransportStarted() error {
 	transportState.Lock()
+	defer transportState.Unlock()
 	transportState.started = true
-	transportState.Unlock()
+	if !transportState.configured {
+		return errors.New("transport must be configured before Tailcat starts")
+	}
+	return nil
 }
 
 func parseWebRTCTransportConfig(args []js.Value) (webRTCTransportConfig, error) {

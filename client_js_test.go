@@ -9,16 +9,18 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall/js"
 	"testing"
 	"time"
 
+	"github.com/tailscale/tailcat"
 	"tailscale.com/ipn/ipnstate"
 )
 
 func TestSessionStreamLimitIncludesPendingDials(t *testing.T) {
 	client := &fakeSessionClient{}
-	s := &jsSession{client: client, connections: make(map[uint64]net.Conn)}
+	s := &jsSession{client: client, connections: make(map[uint64]func())}
 
 	for i := 0; i < maxSessionStreams; i++ {
 		if _, err := s.reserveDial(); err != nil {
@@ -73,9 +75,14 @@ func TestJSSessionDialStatusAndClose(t *testing.T) {
 		t.Fatalf("latencyMs = %v, want 12.5", got)
 	}
 
+	session.Get("close").Invoke()
+	session.Get("close").Invoke()
+	// Closing the session must close each active wrapper and replace its Go
+	// callbacks with safe native JavaScript post-close operations.
 	conn.Get("close").Invoke()
-	session.Get("close").Invoke()
-	session.Get("close").Invoke()
+	if _, err := awaitPromise(conn.Get("read").Invoke()); err == nil {
+		t.Fatal("active connection read after session close succeeded")
+	}
 	closedStatus, err := awaitPromise(session.Get("status").Invoke(statusOptions))
 	if err != nil || closedStatus.Get("state").String() != "closed" || closedStatus.Get("path").String() != "unknown" {
 		t.Fatalf("status after close = %v, %v; want closed/unknown", closedStatus, err)
@@ -140,9 +147,16 @@ func TestSessionStatusPathClassification(t *testing.T) {
 			want: "derp",
 		},
 		{
-			name:   "Other direct endpoint is not exposed",
+			name:   "Direct UDP endpoint is sanitized",
 			result: &ipnstate.PingResult{Endpoint: "192.0.2.1:5678"},
 			want:   "unknown",
+		},
+		{
+			name: "Peer relay endpoint is sanitized",
+			result: &ipnstate.PingResult{
+				PeerRelay: "192.0.2.2:1234:vni:7",
+			},
+			want: "unknown",
 		},
 		{name: "No path metadata", result: &ipnstate.PingResult{}, want: "unknown"},
 	}
@@ -155,7 +169,59 @@ func TestSessionStatusPathClassification(t *testing.T) {
 			if _, ok := got["endpoint"]; ok {
 				t.Fatal("status exposes endpoint")
 			}
+			if _, ok := got["peerRelay"]; ok {
+				t.Fatal("status exposes peer relay address")
+			}
 		})
+	}
+}
+
+func TestAbortSignalCancelsPendingInitialization(t *testing.T) {
+	controller := js.Global().Get("AbortController").New()
+	ctx, cleanup, err := contextWithAbortSignal(context.Background(), controller.Get("signal"))
+	if err != nil {
+		t.Fatalf("contextWithAbortSignal: %v", err)
+	}
+	defer cleanup()
+
+	client := newBlockingInitializationClient()
+	done := make(chan error, 1)
+	go func() {
+		done <- initializeSessionClient(ctx, client)
+	}()
+	select {
+	case <-client.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client initialization did not start")
+	}
+
+	controller.Call("abort")
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("initialization error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("abort did not cancel client initialization")
+	}
+	if got := client.closeCalls.Load(); got != 1 {
+		t.Fatalf("client Close calls = %d, want 1", got)
+	}
+}
+
+func TestAbortSignalValidationAndAlreadyAborted(t *testing.T) {
+	if err := validateAbortSignal(js.Global().Get("Object").New()); err == nil {
+		t.Fatal("plain object accepted as AbortSignal")
+	}
+	controller := js.Global().Get("AbortController").New()
+	controller.Call("abort")
+	ctx, cleanup, err := contextWithAbortSignal(context.Background(), controller.Get("signal"))
+	if err != nil {
+		t.Fatalf("contextWithAbortSignal: %v", err)
+	}
+	defer cleanup()
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("already-aborted context error = %v, want context canceled", ctx.Err())
 	}
 }
 
@@ -272,3 +338,34 @@ func (c *blockingSessionClient) Close() error {
 }
 
 var _ sessionClient = (*blockingSessionClient)(nil)
+
+type blockingInitializationClient struct {
+	started    chan struct{}
+	startOnce  sync.Once
+	closeCalls atomic.Int32
+}
+
+func newBlockingInitializationClient() *blockingInitializationClient {
+	return &blockingInitializationClient{started: make(chan struct{})}
+}
+
+func (c *blockingInitializationClient) Ping(ctx context.Context) (tailcat.PingResult, error) {
+	c.startOnce.Do(func() { close(c.started) })
+	<-ctx.Done()
+	return tailcat.PingResult{}, ctx.Err()
+}
+
+func (*blockingInitializationClient) DialTCPPort(context.Context, uint16) (net.Conn, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (*blockingInitializationClient) DiscoPing(context.Context) (*ipnstate.PingResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *blockingInitializationClient) Close() error {
+	c.closeCalls.Add(1)
+	return nil
+}
+
+var _ initializingSessionClient = (*blockingInitializationClient)(nil)
