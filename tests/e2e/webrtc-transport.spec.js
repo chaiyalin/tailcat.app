@@ -66,7 +66,7 @@ async function qrMatches(page, expectedURL) {
   }, expectedURL);
 }
 
-test("keeps lab invitations on the protected preview origin for copy, share, and QR", async ({ browser }) => {
+test("keeps lab invitations on the dedicated preview origin for copy, share, and QR", async ({ browser }) => {
   test.skip(!experimentalBuild, "requires the WebRTC-tagged WASM artifact");
   const context = await browser.newContext({ locale: "en-US" });
   try {

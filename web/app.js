@@ -86,9 +86,9 @@ function validAddress(value) {
 }
 
 function inviteURL(address) {
-  // Laboratory links must stay on the Access-protected preview deployment.
-  // A canonical production link would bypass that gate and could also join a
-  // build running a different experimental wire implementation.
+  // Laboratory links must stay on the dedicated experiment deployment. A
+  // canonical production link could join a build running a different
+  // experimental wire implementation.
   const origin = MAGICKSOCK_WEBRTC.enabled ? location.origin : CANONICAL_ORIGIN;
   const url = new URL("/", origin);
   url.hash = new URLSearchParams({ v: String(APP_CONFIG.protocolVersion), invite: address }).toString();

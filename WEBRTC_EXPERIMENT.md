@@ -80,9 +80,11 @@ evidence of a direct path.
 ## Preview and rollback
 
 Deploy only to the separate `tailcat-app-webrtc` Pages project. Its branch and
-root `pages.dev` hosts must be protected by Cloudflare Access, it has no custom
-domain, and automatic production deployment is disabled. The experiment UI
-must always show its laboratory status and the current build commit.
+root `pages.dev` hosts are public so testers can join without Cloudflare Access.
+It has no custom domain, and automatic production deployment is disabled. The
+experiment UI must always show its laboratory status and the current build
+commit. Do not collect invitation addresses, keys, filenames, chat content, or
+peer endpoint details in logs.
 
 In a real Cloudflare Pages build, `build.sh` also requires the exact experiment
 branch and a `tailcat-app-webrtc.pages.dev` deployment URL. This makes an
