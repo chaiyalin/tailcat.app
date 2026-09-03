@@ -1537,7 +1537,7 @@ function addMessage(item) {
     summary.className = "file-summary";
     const glyph = document.createElement("span");
     glyph.className = "file-glyph";
-    glyph.textContent = "FILE";
+    glyph.setAttribute("aria-hidden", "true");
     const copy = document.createElement("div");
     const name = document.createElement("strong");
     name.textContent = item.name;
@@ -2331,7 +2331,6 @@ async function startVoiceNote(event) {
       if (recorder?.state === "recording") recorder.stop();
     }, APP_CONFIG.limits.voiceSeconds * 1000 - 250);
     $("ptt-btn").classList.add("recording");
-    $("ptt-btn").textContent = "■";
     $("mobile-recording-controls")?.classList.remove("hidden");
     setStatus(t(voiceHoldMode ? "voice_recording" : "voice_tap_stop"), "loading");
     markActivity();
@@ -2375,7 +2374,6 @@ async function finishVoiceNote(stream) {
   stream.getTracks().forEach((track) => track.stop());
   if (activeVoiceStream === stream) activeVoiceStream = null;
   $("ptt-btn").classList.remove("recording");
-  $("ptt-btn").textContent = "●";
   $("mobile-recording-controls")?.classList.add("hidden");
   const finishedRecorder = recorder;
   recorder = null;
@@ -3018,8 +3016,9 @@ $("media-camera")?.addEventListener("click", toggleMediaCamera);
 $("media-switch-camera")?.addEventListener("click", switchMediaCamera);
 $("media-expand").addEventListener("click", () => {
   const expanded = $("media-dock").classList.toggle("expanded");
-  $("media-expand").textContent = expanded ? "▣" : "□";
+  $("media-expand").classList.toggle("is-expanded", expanded);
   $("media-expand").title = expanded ? t("collapse") : t("expand");
+  $("media-expand").setAttribute("aria-label", expanded ? t("collapse") : t("expand"));
 });
 
 window.addEventListener("beforeunload", () => {

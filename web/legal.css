@@ -320,6 +320,74 @@ summary {
   }
 }
 
+/* Starbridge visual system shared with the room interface. */
+:root {
+  --background: #040805;
+  --surface: #07110b;
+  --surface-raised: #0a1810;
+  --border: #193b28;
+  --border-strong: #2b7047;
+  --text: #eef8f0;
+  --muted: #8da797;
+  --accent: #67efa0;
+  --accent-soft: #123824;
+}
+
+html {
+  font: 15px/1.72 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+body {
+  background:
+    radial-gradient(circle at 78% 8%, rgb(45 123 75 / .14), transparent 30rem),
+    radial-gradient(circle at 12% 72%, rgb(128 83 170 / .055), transparent 24rem),
+    var(--background);
+}
+
+.site-header { min-height: 92px; padding-block: 15px; }
+.brand { color: var(--text); font-size: 1.08rem; letter-spacing: -.02em; }
+.brand-mark {
+  width: 56px;
+  height: 56px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.brand-mark img { width: 100%; height: 100%; display: block; object-fit: contain; }
+.legal-nav { gap: 9px 18px; font-size: .76rem; }
+
+.legal-page {
+  padding: 38px clamp(20px, 4.5vw, 58px) 52px;
+  border-color: var(--border);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgb(8 19 12 / .96), rgb(4 11 7 / .985));
+  box-shadow: 0 30px 90px rgb(0 0 0 / .34);
+}
+
+h1 { color: #e9f7ed; letter-spacing: -.045em; }
+h2, h3 { color: #d8ecde; }
+h2::before { content: none; }
+.eyebrow, .language-label { color: var(--accent); }
+.lede { color: #91a89a; }
+.notice, .fact, details { border-radius: 12px; }
+.notice { background: rgb(18 56 36 / .72); }
+.fact { background: #0a1810; }
+
+.error-page {
+  grid-template-columns: minmax(250px, .9fr) minmax(300px, 1.1fr);
+  gap: clamp(16px, 5vw, 64px);
+  min-height: 68vh;
+  text-align: left;
+}
+.error-art { width: min(100%, 470px); height: auto; justify-self: center; filter: drop-shadow(0 24px 35px rgb(0 0 0 / .35)); }
+.error-code { color: var(--accent); font-size: clamp(4rem, 11vw, 7rem); text-shadow: 0 0 30px rgb(103 239 160 / .18); }
+
+@media (max-width: 720px) {
+  .error-page { grid-template-columns: 1fr; text-align: center; }
+  .error-art { width: min(78vw, 360px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -5,24 +5,25 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
   <meta name="robots" content="noindex,nofollow,noarchive">
   <meta name="referrer" content="no-referrer">
-  <meta name="theme-color" content="#07100a">
+  <meta name="theme-color" content="#050a07">
   <title>tailcat.app — temporary encrypted sharing</title>
   <link rel="icon" href="vendor/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="app.css">
+  <link rel="preload" href="assets/voxel-starbridge-hero.webp" as="image" type="image/webp" media="(min-width: 800px) and (pointer: fine)" fetchpriority="high">
+  <link rel="stylesheet" href="app.css?v=starbridge-1">
 </head>
 <body>
   <a class="skip-link" href="#history" data-i18n="skip_content">Skip to messages</a>
 
   <section id="browser-blocker" class="browser-blocker hidden" role="alert">
     <div class="browser-card">
-      <div class="wordmark"><span aria-hidden="true">tc</span> tailcat.app</div>
+      <div class="wordmark"><span class="wordmark-mark" aria-hidden="true"><img src="assets/voxel-cat-mark.webp" width="256" height="256" alt=""></span> tailcat.app</div>
       <span class="pill" data-i18n="beta">Public beta</span>
       <h1 data-i18n="browser_block_title">This browser is not supported</h1>
       <p data-i18n="browser_block_body">Use desktop Chrome or Edge. Android Chrome is available as a beta and should remain in the foreground while transferring.</p>
       <p class="muted" data-i18n="browser_block_privacy">No room was started and no invite was sent over the network.</p>
       <div id="blocked-invite-copy" class="hidden">
         <p class="muted" data-i18n="invite_preserved">The invitation is still available in this page's memory. Copy it and open it in a supported browser.</p>
-        <button id="copy-blocked-invite" class="button primary" type="button" data-i18n="copy_preserved_invite">Copy invitation</button>
+        <button id="copy-blocked-invite" class="button primary label-icon icon-copy" type="button" data-i18n="copy_preserved_invite">Copy invitation</button>
       </div>
       <label class="language-field">
         <span data-i18n="language">Language</span>
@@ -37,9 +38,12 @@
   <div id="app" class="app" data-mobile-state="landing" data-mobile-sheet="closed" aria-busy="true">
     <header class="topbar">
       <a class="brand" href="/" aria-label="tailcat.app">
-        <span class="brand-mark" aria-hidden="true">tc</span>
+        <span class="brand-mark" aria-hidden="true"><img src="assets/voxel-cat-mark.webp" width="256" height="256" alt=""></span>
         <span><strong>tailcat.app</strong><small data-i18n="tagline">Temporary encrypted sharing</small></span>
       </a>
+      <div class="chat-header">
+        <div class="chat-title"><span class="chat-title-icon ui-icon icon-lock" aria-hidden="true"></span><div><h2 data-i18n="messages_title">Encrypted room</h2><p id="peer-label" data-i18n="waiting_peer">No peer connected</p></div></div>
+      </div>
       <div class="top-actions">
         <span class="pill" data-i18n="beta">Public beta</span>
         <label class="language-field compact">
@@ -49,14 +53,14 @@
             <option value="en">English</option>
           </select>
         </label>
-        <button id="mobile-menu-btn" class="icon-button compact-icon mobile-menu-button mobile-only" type="button" data-i18n-title="open_controls" aria-label="Open room controls" aria-controls="mobile-controls-sheet" aria-expanded="false">•••</button>
+        <button id="mobile-menu-btn" class="icon-button compact-icon mobile-menu-button mobile-only" type="button" data-i18n-title="open_controls" aria-label="Open room controls" aria-controls="mobile-controls-sheet" aria-expanded="false"><span class="ui-icon icon-more" aria-hidden="true"></span></button>
       </div>
     </header>
 
     <aside id="mobile-controls-sheet" class="sidebar" aria-label="Room controls">
       <header class="mobile-sheet-header mobile-only">
         <strong id="mobile-controls-title" data-i18n="room_controls">Room controls</strong>
-        <button id="mobile-sheet-close" class="icon-button compact-icon" type="button" data-i18n-title="close_controls" aria-label="Close room controls">×</button>
+        <button id="mobile-sheet-close" class="icon-button compact-icon" type="button" data-i18n-title="close_controls" aria-label="Close room controls"><span class="ui-icon icon-xmark" aria-hidden="true"></span></button>
       </header>
 
       <section class="panel room-panel">
@@ -79,23 +83,23 @@
           <button id="forget-key" class="text-button hidden" type="button" data-i18n="forget_address">Forget saved address</button>
 
           <div class="button-row room-buttons">
-            <button id="listen-btn" class="button primary" type="button" disabled data-i18n="start_room">Open encrypted room</button>
-            <button id="stop-listen-btn" class="button danger hidden" type="button" data-i18n="stop_room">Close room</button>
+            <button id="listen-btn" class="button primary label-icon icon-lock" type="button" disabled data-i18n="start_room">Open encrypted room</button>
+            <button id="stop-listen-btn" class="button danger hidden label-icon icon-xmark" type="button" data-i18n="stop_room">Close room</button>
           </div>
         </div>
 
         <div id="listen-info" class="address-card hidden">
           <div class="mobile-invite-heading mobile-only">
-            <span class="invite-ready-mark" aria-hidden="true">✓</span>
+            <span class="invite-ready-mark" aria-hidden="true"><span class="ui-icon icon-check"></span></span>
             <div><strong data-i18n="invite_ready">Invitation ready</strong><p data-i18n="invite_ready_body">Share it with one person, then keep this page open.</p></div>
           </div>
           <span class="field-label" data-i18n="your_address">Your Tailcat address</span>
           <code id="listen-addr" class="address" aria-live="polite"></code>
           <div class="button-row wrap">
-            <button id="share-invite" class="button small primary mobile-only" type="button" data-i18n="native_share">Share invite</button>
-            <button id="copy-invite" class="button small primary" type="button" data-i18n="copy_invite">Copy invite</button>
-            <button id="show-qr" class="button small" type="button" data-i18n="show_qr">Show QR</button>
-            <button id="copy-addr" class="button small" type="button" data-i18n="copy_address">Copy address</button>
+            <button id="share-invite" class="button small primary mobile-only label-icon icon-share" type="button" data-i18n="native_share">Share invite</button>
+            <button id="copy-invite" class="button small primary label-icon icon-copy" type="button" data-i18n="copy_invite">Copy invite</button>
+            <button id="show-qr" class="button small label-icon icon-qr" type="button" data-i18n="show_qr">Show QR</button>
+            <button id="copy-addr" class="button small label-icon icon-copy" type="button" data-i18n="copy_address">Copy address</button>
           </div>
         </div>
       </section>
@@ -108,7 +112,7 @@
         <label class="field-label" for="send-addr" data-i18n="peer_address">Peer Tailcat address</label>
         <div class="input-action">
           <input id="send-addr" class="field" type="text" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="tc…">
-          <button id="connect-btn" class="button" type="button" disabled data-i18n="connect">Connect</button>
+          <button id="connect-btn" class="button label-icon icon-globe" type="button" disabled data-i18n="connect">Connect</button>
         </div>
       </section>
 
@@ -126,9 +130,9 @@
       <section class="panel live-panel">
         <div class="panel-heading compact-heading"><span class="step">03</span><div><h2 data-i18n="live_heading">Live link</h2></div></div>
         <div class="live-actions">
-          <button id="voice-call-btn" class="button" type="button" disabled data-i18n="voice_call">Voice call</button>
-          <button id="video-call-btn" class="button" type="button" disabled data-i18n="video_call">Video call</button>
-          <button id="screen-share-btn" class="button" type="button" disabled data-i18n="screen_share">Share screen</button>
+          <button id="voice-call-btn" class="button label-icon icon-phone" type="button" disabled data-i18n="voice_call">Voice call</button>
+          <button id="video-call-btn" class="button label-icon icon-video" type="button" disabled data-i18n="video_call">Video call</button>
+          <button id="screen-share-btn" class="button label-icon icon-computer" type="button" disabled data-i18n="screen_share">Share screen</button>
         </div>
         <p class="field-help" data-i18n="rtc_note">Calls use encrypted WebRTC with Cloudflare STUN only; there is no TURN fallback.</p>
       </section>
@@ -136,17 +140,19 @@
     <button id="mobile-sheet-backdrop" class="mobile-sheet-backdrop mobile-only" type="button" data-i18n-title="close_controls" aria-label="Close room controls" tabindex="-1"></button>
 
     <main id="content" class="chat">
-      <header class="chat-header">
-        <div><h2 data-i18n="messages_title">Encrypted room</h2><p id="peer-label" data-i18n="waiting_peer">No peer connected</p></div>
-        <span class="secure-badge"><span aria-hidden="true">●</span> <span data-i18n="secure">End-to-end encrypted</span></span>
-      </header>
+      <span class="secure-badge"><span class="ui-icon icon-shield" aria-hidden="true"></span><span data-i18n="secure">End-to-end encrypted</span></span>
 
       <section id="history" class="history" tabindex="-1" aria-live="polite" aria-label="Messages">
         <div id="welcome" class="welcome">
-          <span class="welcome-lock" aria-hidden="true">◇</span>
-          <h2 data-i18n="welcome_title">Share only while both people are online</h2>
-          <p data-i18n="welcome_body">Create or join a room. Messages and files are not uploaded or kept by this site; an address key is saved locally only if you opt in.</p>
-          <span class="no-storage" data-i18n="no_storage">No accounts · no server-side history · optional local address key</span>
+          <picture class="welcome-art-frame" aria-hidden="true">
+            <source media="(max-width: 1366px) and (pointer: coarse)" srcset="assets/voxel-cat-mark.webp">
+            <img class="welcome-art" src="assets/voxel-starbridge-hero.webp" width="1672" height="941" alt="" fetchpriority="high" decoding="async">
+          </picture>
+          <div class="welcome-copy">
+            <h2 data-i18n="welcome_title">Share only while both people are online</h2>
+            <p data-i18n="welcome_body">Create or join a room. Messages and files are not uploaded or kept by this site; an address key is saved locally only if you opt in.</p>
+            <span class="no-storage" data-i18n="no_storage">No accounts · no server-side history · optional local address key</span>
+          </div>
         </div>
       </section>
 
@@ -158,11 +164,11 @@
       <section id="composer" class="composer">
         <div id="drop-zone" class="drop-zone hidden" data-i18n="drop_files">Drop files to add them to the queue</div>
         <div class="compose-row">
-          <button id="attach-btn" class="icon-button" type="button" disabled data-i18n-title="attach" aria-label="Attach files">＋</button>
+          <button id="attach-btn" class="icon-button" type="button" disabled data-i18n-title="attach" aria-label="Attach files"><span class="ui-icon icon-attachment" aria-hidden="true"></span></button>
           <input id="send-file" type="file" multiple hidden>
           <textarea id="send-text" class="field message-input" rows="1" maxlength="65536" disabled data-i18n-placeholder="message_placeholder" placeholder="Write an encrypted message…"></textarea>
-          <button id="ptt-btn" class="icon-button" type="button" disabled data-i18n-title="record_voice" aria-label="Hold to record voice note">●</button>
-          <button id="send-text-btn" class="icon-button send" type="button" disabled data-i18n-title="send_message" aria-label="Send message">↑</button>
+          <button id="ptt-btn" class="icon-button" type="button" disabled data-i18n-title="record_voice" aria-label="Hold to record voice note"><span class="ui-icon icon-microphone" aria-hidden="true"></span></button>
+          <button id="send-text-btn" class="icon-button send" type="button" disabled data-i18n-title="send_message" aria-label="Send message"><span class="ui-icon icon-send" aria-hidden="true"></span></button>
         </div>
         <div id="mobile-recording-controls" class="mobile-recording-controls mobile-only hidden" role="group" aria-label="Voice note recording">
           <span class="mobile-recording-status"><span class="recording-dot" aria-hidden="true"></span><span id="mobile-recording-label" data-i18n="voice_tap_stop">Recording · tap Send or Cancel</span></span>
@@ -180,11 +186,11 @@
     <section id="media-dock" class="media-dock hidden" aria-label="Live media">
       <header class="media-bar">
         <strong id="media-title" data-i18n="live_link">Live link</strong>
-        <button id="media-expand" class="icon-button compact-icon" type="button" data-i18n-title="expand" aria-label="Expand">□</button>
-        <button id="media-mute" class="icon-button compact-icon media-control-button" type="button" data-i18n-title="call_mute" aria-label="Mute microphone" aria-pressed="false"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"></path></svg></button>
-        <button id="media-camera" class="icon-button compact-icon media-control-button" type="button" data-i18n-title="camera_off" aria-label="Turn camera off" aria-pressed="false"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"></rect><path d="m15 10 6-3v10l-6-3"></path></svg></button>
-        <button id="media-switch-camera" class="icon-button compact-icon media-control-button hidden" type="button" data-i18n-title="switch_camera" aria-label="Switch camera"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9a8 8 0 0 1 13-3l2 2M20 15a8 8 0 0 1-13 3l-2-2M19 3v5h-5M5 21v-5h5"></path></svg></button>
-        <button id="media-hangup" class="icon-button compact-icon danger" type="button" data-i18n-title="hang_up" aria-label="End call">×</button>
+        <button id="media-expand" class="icon-button compact-icon" type="button" data-i18n-title="expand" aria-label="Expand"><span class="ui-icon icon-expand" aria-hidden="true"></span></button>
+        <button id="media-mute" class="icon-button compact-icon media-control-button" type="button" data-i18n-title="call_mute" aria-label="Mute microphone" aria-pressed="false"><span class="ui-icon icon-microphone" aria-hidden="true"></span></button>
+        <button id="media-camera" class="icon-button compact-icon media-control-button" type="button" data-i18n-title="camera_off" aria-label="Turn camera off" aria-pressed="false"><span class="ui-icon icon-video" aria-hidden="true"></span></button>
+        <button id="media-switch-camera" class="icon-button compact-icon media-control-button hidden" type="button" data-i18n-title="switch_camera" aria-label="Switch camera"><span class="ui-icon icon-refresh" aria-hidden="true"></span></button>
+        <button id="media-hangup" class="icon-button compact-icon danger" type="button" data-i18n-title="hang_up" aria-label="End call"><span class="ui-icon icon-xmark" aria-hidden="true"></span></button>
       </header>
       <div class="media-stage">
         <video id="remote-media" autoplay playsinline></video>
@@ -212,7 +218,7 @@
       <h2 data-i18n="qr_title">Scan to join this room</h2>
       <p data-i18n="qr_body">The QR code is generated locally in this browser.</p>
       <canvas id="qr-canvas" width="320" height="320" aria-label="Room invitation QR code"></canvas>
-      <button id="qr-close" class="button primary" type="button" data-i18n="close">Close</button>
+      <button id="qr-close" class="button primary label-icon icon-xmark" type="button" data-i18n="close">Close</button>
     </div>
   </dialog>
 
@@ -222,8 +228,8 @@
       <h2 id="incoming-call-description">Incoming call</h2>
       <p data-i18n="call_permission">Camera or microphone access is requested only after you accept.</p>
       <div class="button-row end">
-        <button id="decline-call" class="button danger" value="cancel" type="button" data-i18n="decline">Decline</button>
-        <button id="accept-call" class="button primary" value="default" type="button" data-i18n="accept">Accept</button>
+        <button id="decline-call" class="button danger label-icon icon-xmark" value="cancel" type="button" data-i18n="decline">Decline</button>
+        <button id="accept-call" class="button primary label-icon icon-phone" value="default" type="button" data-i18n="accept">Accept</button>
       </div>
     </form>
   </dialog>
@@ -236,6 +242,6 @@
   </template>
 
   <script src="wasm_exec.js"></script>
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=starbridge-1"></script>
 </body>
 </html>
