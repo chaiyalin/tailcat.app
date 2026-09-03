@@ -13,6 +13,7 @@ const mimeTypes = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
+  ".webp": "image/webp",
 };
 
 function parseHeadersFile() {

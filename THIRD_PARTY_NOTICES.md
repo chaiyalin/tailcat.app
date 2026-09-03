@@ -189,6 +189,17 @@ Patent grant: [`PATENTS`](https://github.com/golang/go/blob/go1.27.0/PATENTS), S
 
 ## Vendored browser library
 
+### Iconoir v7.12.1
+
+The interface uses a locally vendored subset of the
+[`Iconoir`](https://github.com/iconoir-icons/iconoir/tree/v7.12.1) SVG icon library.
+
+License: MIT
+
+Vendored notice: [`web/vendor/iconoir/LICENSE.txt`](web/vendor/iconoir/LICENSE.txt)
+
+Notice: Copyright (c) 2021 Luca Burgio
+
 ### uqr v0.1.3
 
 Invitation QR codes use the locally vendored
