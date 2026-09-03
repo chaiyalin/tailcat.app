@@ -4,7 +4,7 @@ An unofficial, accountless encrypted browser room built from [Tailcatchat](https
 
 > **Public beta:** public Tailcat DERP relays are rate-limited, best-effort infrastructure with no uptime SLA or throughput target. Do not use this service as the only copy of important data.
 
-> **Release target `0.3.0-beta.1`:** Group Beta is implemented behind the independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` static release switches. Both remain off in production until their 3/6/10-person, public-DERP, and real-device gates pass. Disabling either group switch does not affect private one-to-one rooms.
+> **Limited production beta:** Group Beta is implemented behind the independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` static release switches. Desktop hosting is enabled for the operator-authorized limited rollout; mobile hosting remains off until its real-device gates pass. Disabling either group switch does not affect private one-to-one rooms.
 
 tailcat.app supports temporary text, file, and voice-note transfers while participants are online. Private rooms also support WebRTC voice/video calls and screen sharing; Group Beta does not. There is no account, application database, server-side file store, offline delivery, cloud chat history, recovery service, content moderation, or malware scanning. iOS Safari may use this origin's private browser storage to stage an approved incoming file until the user exports or deletes it.
 
@@ -140,7 +140,7 @@ Connect the public GitHub repository `chaiyalin/tailcat.app` to a Pages project 
 | Build output directory | `dist` |
 | Environment variables | `GO_VERSION=1.27.0`, `SKIP_DEPENDENCY_INSTALL=1` |
 
-Production must leave `TAILCAT_GROUP_ROOMS_ENABLED`, `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED`, and `TAILCAT_PREVIEW_INVITES` unset (or set to `0`). For an Access-protected branch preview, set `TAILCAT_GROUP_ROOMS_ENABLED=1` and `TAILCAT_PREVIEW_INVITES=1`; enable `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=1` only while running the mobile-host gate. `build.sh` accepts only `0` or `1`, rejects mobile hosting without group rooms, and generates the public `runtime-config.js` artifact. No secret belongs in these variables or that file.
+The limited production Group Beta artifact sets `TAILCAT_GROUP_ROOMS_ENABLED=1`, `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=0`, and `TAILCAT_PREVIEW_INVITES=0`. Setting the group switch back to `0` is the production kill switch. For an Access-protected branch preview, set `TAILCAT_GROUP_ROOMS_ENABLED=1` and `TAILCAT_PREVIEW_INVITES=1`; enable `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=1` only while running the mobile-host gate. `build.sh` accepts only `0` or `1`, rejects mobile hosting without group rooms, and generates the public `runtime-config.js` artifact. No secret belongs in these variables or that file.
 
 A local preview-equivalent artifact can be built with:
 
@@ -176,7 +176,7 @@ Desktop Chrome and Edge should each complete a 1 GiB transfer on Windows and mac
 
 Group Beta adds an Access-protected preview gate at 3, 6, and then 10 people. The 10-browser gate runs for 60 minutes over real public DERP, sends a 1 MiB file to nine recipients and a 100 MiB file to two recipients with verification, exercises network switching and reconnect, and checks that connection/stream/heap resources are reclaimed across 20 cycles. Android Chrome and iOS Safari must each host nine participants in the foreground for 30 minutes and pass wake-lock failure, background pause, 120-second recovery, and timeout shutdown checks.
 
-Release sequence: Access-protected preview from `feature/group-rooms-v2` → 3/6/10-person gates → public-DERP and real-device gates → merge to `main` with production group switches still off → limited enablement → tag `app-v0.3.0-beta.1`. Any failed group gate leaves `groupRoomsEnabled` off; a failed mobile-host gate leaves `mobileGroupHostingEnabled` off. Cloudflare Pages rollback or either static switch can disable Group Beta without affecting private rooms.
+Release sequence: Access-protected preview from `feature/group-rooms-v2` → 3/6/10-person gates → public-DERP and real-device gates → merge to `main` → tag `app-v0.3.0-beta.1`. The operator-authorized limited production rollout currently enables desktop-hosted Group Beta before the outstanding external gates are recorded complete; mobile hosting remains off and the release must not be tagged until those gates pass. Cloudflare Pages rollback or either static switch can disable Group Beta without affecting private rooms.
 
 Group diagnostics contain no invitation, token, Tailcat address, nickname, message, file name, content, or IP address. If operational diagnostics are enabled, they are limited to an anonymous run identifier, member count, latency, error category, byte count, and resource counts.
 

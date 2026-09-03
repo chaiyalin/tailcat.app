@@ -12,9 +12,9 @@ export const APP_CONFIG = Object.freeze({
   // Emergency beta kill switch. Set false and redeploy this static file to
   // leave the explanatory site online while preventing new rooms.
   roomsEnabled: true,
-  // Group rooms remain off in production until the 3/6/10-person release
-  // gates are complete. Preview and deterministic tests opt in before this
-  // module loads by setting __TAILCAT_GROUP_BETA__.
+  // Group rooms use a static rollout switch so production can enable or
+  // disable the beta independently of private rooms. Preview and deterministic
+  // tests opt in before this module loads by setting __TAILCAT_GROUP_BETA__.
   groupRoomsEnabled: GROUP_ROOMS_ENABLED,
   mobileGroupHostingEnabled: MOBILE_GROUP_HOSTING_ENABLED,
   previewInvitesEnabled: PREVIEW_INVITES_ENABLED,
