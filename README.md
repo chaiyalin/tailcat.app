@@ -4,7 +4,7 @@ An unofficial, accountless encrypted browser room built from [Tailcatchat](https
 
 > **Public beta:** public Tailcat DERP relays are rate-limited, best-effort infrastructure with no uptime SLA or throughput target. Do not use this service as the only copy of important data.
 
-> **Limited production beta:** Group Beta is implemented behind the independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` static release switches. Desktop hosting is enabled for the operator-authorized limited rollout; mobile hosting remains off until its real-device gates pass. Disabling either group switch does not affect private one-to-one rooms.
+> **Release target `0.3.0-beta.1` — limited production beta:** Group Beta is implemented behind the independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` static release switches. Desktop hosting is enabled for the operator-authorized limited rollout; mobile hosting remains off until its real-device gates pass. Disabling either group switch does not affect private one-to-one rooms.
 
 tailcat.app supports temporary text, file, and voice-note transfers while participants are online. Private rooms also support WebRTC voice/video calls and screen sharing; Group Beta does not. There is no account, application database, server-side file store, offline delivery, cloud chat history, recovery service, content moderation, or malware scanning. iOS Safari may use this origin's private browser storage to stage an approved incoming file until the user exports or deletes it.
 
