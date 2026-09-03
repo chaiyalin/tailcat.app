@@ -12,6 +12,7 @@ export async function installMockTailcat(page, namespace) {
   expect(initialErrors).toEqual([]);
 
   await page.evaluate(({ namespace: channelNamespace }) => {
+    const MAX_READ_BYTES = 64 * 1024;
     const endpoint = crypto.randomUUID();
     const channel = new BroadcastChannel(`tailcat-e2e-${channelNamespace}`);
     const connections = new Map();
@@ -21,7 +22,11 @@ export async function installMockTailcat(page, namespace) {
     let listenerSequence = 0;
     let corruptNextFileData = false;
     let fileWriteDelayMs = 0;
+    let fileFinalWriteDelayMs = 0;
+    let failNextFileFinalMessage = "";
+    let fileFinalWritesStarted = 0;
     let failControlDials = false;
+    let failGroupDials = false;
 
     function stableHex(value) {
       // This is only an address identity function for the transport fixture,
@@ -67,15 +72,32 @@ export async function installMockTailcat(page, namespace) {
       }
     }
 
+    function takeQueuedBytes(state, maximum) {
+      const bytes = state.queue.shift();
+      if (bytes.length <= maximum) return bytes;
+      state.queue.unshift(bytes.slice(maximum));
+      return bytes.slice(0, maximum);
+    }
+
+    function flushReads(state) {
+      while (state.waiters.length && state.queue.length) {
+        const waiter = state.waiters.shift();
+        waiter.resolve(takeQueuedBytes(state, waiter.maximum));
+      }
+      if ((state.remoteEnded || state.closed) && !state.queue.length) {
+        while (state.waiters.length) state.waiters.shift().resolve(null);
+      }
+    }
+
     function endReads(state) {
       state.remoteEnded = true;
-      while (state.waiters.length) state.waiters.shift()(null);
+      flushReads(state);
     }
 
     function deliver(state, bytes) {
       if (state.remoteEnded || state.closed) return;
-      if (state.waiters.length) state.waiters.shift()(bytes);
-      else state.queue.push(bytes);
+      state.queue.push(bytes);
+      flushReads(state);
     }
 
     function makeConnection({ id, peer, port, direction }) {
@@ -106,10 +128,13 @@ export async function installMockTailcat(page, namespace) {
 
       const connection = {
         port,
-        async read() {
-          if (state.queue.length) return state.queue.shift();
+        async read(maxBytes = MAX_READ_BYTES) {
+          if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_READ_BYTES) {
+            throw new Error(`read maximum must be an integer from 1 through ${MAX_READ_BYTES}`);
+          }
+          if (state.queue.length) return takeQueuedBytes(state, maxBytes);
           if (state.remoteEnded || state.closed) return null;
-          return new Promise((resolve) => state.waiters.push(resolve));
+          return new Promise((resolve) => state.waiters.push({ resolve, maximum: maxBytes }));
         },
         async write(input) {
           // A remote half-close ends reads only; TCP remains writable until
@@ -128,6 +153,17 @@ export async function installMockTailcat(page, namespace) {
           }
           if (fileWriteDelayMs > 0 && port === 102 && bytes[0] === 2) {
             await new Promise((resolve) => setTimeout(resolve, fileWriteDelayMs));
+          }
+          if (port === 102 && bytes[0] === 3) {
+            fileFinalWritesStarted += 1;
+            if (fileFinalWriteDelayMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, fileFinalWriteDelayMs));
+            }
+          }
+          if (port === 102 && bytes[0] === 3 && failNextFileFinalMessage) {
+            const message = failNextFileFinalMessage;
+            failNextFileFinalMessage = "";
+            throw new Error(message);
           }
           // Fragment each application write at awkward boundaries so framing
           // is exercised independently of the transport's packet boundaries.
@@ -227,6 +263,9 @@ export async function installMockTailcat(page, namespace) {
       if (failControlDials && Number(options.port) === 100) {
         throw new Error("mock control path unavailable");
       }
+      if (failGroupDials && Number(options.port) === 104) {
+        throw new Error("mock group path unavailable");
+      }
       const id = crypto.randomUUID();
       const connection = makeConnection({
         id,
@@ -260,6 +299,57 @@ export async function installMockTailcat(page, namespace) {
       });
     };
 
+    const connect = async (options = {}) => {
+      let closed = false;
+      const active = new Set();
+      const pendingRejects = new Set();
+      const closeClient = () => {
+        if (closed) return;
+        closed = true;
+        for (const reject of pendingRejects) reject(new Error("mock persistent client is closed"));
+        pendingRejects.clear();
+        for (const connection of [...active]) connection.close();
+        active.clear();
+      };
+      options.signal?.addEventListener("abort", closeClient, { once: true });
+      if (options.signal?.aborted) closeClient();
+      return {
+        async dial(dialOptions = {}) {
+          if (closed) throw new Error("mock persistent client is closed");
+          const connection = await new Promise((resolve, reject) => {
+            pendingRejects.add(reject);
+            void dial({ ...options, ...dialOptions }).then((opened) => {
+              pendingRejects.delete(reject);
+              if (closed) {
+                opened.close();
+                reject(new Error("mock persistent client is closed"));
+              } else {
+                resolve(opened);
+              }
+            }, (error) => {
+              pendingRejects.delete(reject);
+              reject(error);
+            });
+          });
+          if (closed) {
+            connection.close();
+            throw new Error("mock persistent client is closed");
+          }
+          active.add(connection);
+          const originalClose = connection.close.bind(connection);
+          connection.close = () => {
+            active.delete(connection);
+            originalClose();
+          };
+          return connection;
+        },
+        close() {
+          options.signal?.removeEventListener("abort", closeClient);
+          closeClient();
+        },
+      };
+    };
+
     // OPEN_ACK tells us which endpoint owns the address. Capture it before
     // resolving the dial so subsequent DATA messages are addressed correctly.
     const originalOnMessage = channel.onmessage;
@@ -274,6 +364,7 @@ export async function installMockTailcat(page, namespace) {
 
     globalThis.tailcatListen = listen;
     globalThis.tailcatDial = dial;
+    globalThis.tailcatConnect = connect;
     globalThis.__mockTailcat = {
       endpoint,
       setCorruptNextFileData(value = true) {
@@ -282,8 +373,23 @@ export async function installMockTailcat(page, namespace) {
       setFileWriteDelay(milliseconds = 0) {
         fileWriteDelayMs = Math.max(0, Number(milliseconds) || 0);
       },
+      failNextFileFinal(message, delayMs = 0) {
+        failNextFileFinalMessage = String(message || "injected group file final failure");
+        fileFinalWriteDelayMs = Math.max(0, Number(delayMs) || 0);
+      },
       setFailControlDials(value = true) {
         failControlDials = Boolean(value);
+      },
+      setFailGroupDials(value = true) {
+        failGroupDials = Boolean(value);
+      },
+      closeConnections({ port, direction } = {}) {
+        for (const state of connections.values()) {
+          if (state.closed) continue;
+          if (port !== undefined && state.port !== Number(port)) continue;
+          if (direction && state.record.direction !== direction) continue;
+          state.connection.close();
+        }
       },
       async sendEnvelope(addr, envelope, port = 100) {
         const connection = await dial({ addr, port });
@@ -306,6 +412,7 @@ export async function installMockTailcat(page, namespace) {
         return {
           endpoint,
           listenerAddress: listener?.addr || null,
+          fileFinalWritesStarted,
           records: records.map((record) => ({
             id: record.id,
             port: record.port,
@@ -415,9 +522,21 @@ export async function installMockVoiceMedia(page) {
   });
 }
 
-export async function openMockPage(context, namespace) {
+export async function openMockPage(context, namespace, {
+  group = false,
+  mobileGroupHosting = false,
+  previewInvites = false,
+  url = "/",
+} = {}) {
   const page = await context.newPage();
-  await page.goto("/");
+  if (group) {
+    await page.addInitScript(({ mobile, preview }) => {
+      globalThis.__TAILCAT_GROUP_BETA__ = true;
+      globalThis.__TAILCAT_MOBILE_GROUP_HOSTING__ = mobile;
+      globalThis.__TAILCAT_PREVIEW_INVITES__ = preview;
+    }, { mobile: mobileGroupHosting, preview: previewInvites });
+  }
+  await page.goto(url);
   await installMockTailcat(page, namespace);
   return page;
 }

@@ -26,7 +26,7 @@ Never force-push `main` to synchronize upstream. Review and integrate upstream c
 - Tailcatchat fork baseline: the audited commit recorded by Git history when this fork was created.
 - Tailcat Go module: release `v0.4.0` exactly.
 - Go toolchain: `1.27.0`.
-- First public beta tag: `app-v0.1.0-beta.1` after the observation period and release gates pass.
+- Group Beta release target: `app-v0.3.0-beta.1` after the protected-preview, public-DERP, and real-device gates pass.
 
 `go.mod` and `go.sum` are the source of truth for the resolved dependency graph. Do not replace the Tailcat release with `@main`, a floating branch, or an unreviewed pseudo-version.
 
@@ -42,7 +42,7 @@ Never force-push `main` to synchronize upstream. Review and integrate upstream c
    All rights reserved.
    ```
 
-5. Reapply or consciously revise tailcat.app product constraints: one peer, fragment removal, 30-minute idle shutdown, explicit persistence, receiver consent, streaming `TCF1`, size limits, local-only QR generation, bilingual disclosures, and Cloudflare security headers.
+5. Reapply or consciously revise tailcat.app product constraints: one active peer in private rooms; an independently gated 10-person temporary Group Beta; immediate fragment removal; private-only explicit address persistence; recipient consent; streaming `TCF1`, `TCV1`, and framed `TCG1`; bounded queues and size limits; local-only QR generation; bilingual disclosures; and Cloudflare security headers.
 6. Run the full automated, two-browser, real-device, CSP, and Cloudflare preview checks before merging.
 
 ## Updating Tailcat
@@ -58,11 +58,11 @@ go mod verify
 
 Replace `vNEXT` with an actual published version; never run the example literally and never use `@main` for production. Review the release notes and dependency diff, then verify:
 
-- the WASM bridge still exposes compatible `tailcatListen`, `tailcatDial`, listener region, and incremental SHA-256 behavior;
+- the WASM bridge still exposes compatible `tailcatListen`, `tailcatDial`, stable-lifecycle `tailcatConnect`, listener region, and incremental SHA-256 behavior;
 - an old production page and the candidate page reject incompatible handshakes safely instead of falling back to whole-file buffering;
 - invite and `tc…` parsing remain compatible or fail closed;
 - ephemeral and remembered address behavior is correct;
-- text, `TCF1` files, voice notes, and WebRTC signaling pass in both directions;
+- private text, `TCF1` files, voice notes, and WebRTC signaling pass in both directions, while Group Beta `TCG1`/`TCV1` interoperability and direct selected-recipient transfers pass independently;
 - the compressed WASM remains below Cloudflare Pages' 25 MiB per-file limit; and
 - the candidate works through every configured public DERP region without assuming uptime or throughput.
 
@@ -76,4 +76,4 @@ The local QR generator is currently `uqr v0.1.3`, vendored as `web/vendor/uqr.js
 
 ## Release evidence
 
-Keep the reviewed upstream commit, Tailcat version, Go version, dependency verification result, compressed WASM size, browser matrix results, protocol interoperability result, and Cloudflare preview URL with the release notes. Create `app-v0.1.0-beta.1` only after the deployment and observation gates in `README.md` are complete.
+Keep the reviewed upstream commit, Tailcat version, Go version, dependency verification result, compressed WASM size, browser matrix results, protocol interoperability result, and Access-protected Cloudflare preview URL with the release notes. Create `app-v0.3.0-beta.1` only after every deployment and observation gate in `README.md` is complete; deterministic CI alone is not sufficient.

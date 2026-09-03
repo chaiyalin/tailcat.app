@@ -24,12 +24,12 @@
   <main class="legal-page">
     <p class="eyebrow">Security model · 安全模型</p>
     <h1>安全说明 / Security notes</h1>
-    <p class="lede">加密保护传输中的内容；它不验证对方身份，也不能保护已被控制的终端或危险文件。请在使用前了解边界。</p>
-    <p class="lede" lang="en">Encryption protects content in transit. It does not authenticate the person on the other end or protect a compromised endpoint or a dangerous file. Understand the boundary before use.</p>
-    <p class="updated">更新日期 / Updated: 2026-09-01</p>
+    <p class="lede">加密保护网络链路中的内容；它不验证参与者身份，也不能保护已被控制的终端或危险文件。多人群聊还必须信任房主。请在使用前了解边界。</p>
+    <p class="lede" lang="en">Encryption protects content on each network link. It does not authenticate participants or protect a compromised endpoint or dangerous file, and group text additionally requires trusting the host. Understand the boundary before use.</p>
+    <p class="updated">更新日期 / Updated: 2026-09-03</p>
 
     <div class="facts" aria-label="Security facts">
-      <div class="fact"><strong>WireGuard E2EE</strong><span>文字、文件、语音留言和通话信令。</span></div>
+      <div class="fact"><strong>WireGuard 链路加密</strong><span>一对一内容与每条多人网络链路。</span></div>
       <div class="fact"><strong>WebRTC DTLS-SRTP</strong><span>实时语音、视频与屏幕媒体。</span></div>
       <div class="fact"><strong>DERP 元数据 / Metadata</strong><span>中继可见 IP、时间、区域和流量模式。</span></div>
       <div class="fact"><strong>不扫描 / No scanning</strong><span>内容不经过病毒或恶意软件检查。</span></div>
@@ -45,8 +45,9 @@
 
         <h2>1. 保护范围</h2>
         <ul>
-          <li>文字、文件、语音留言以及通话信令在双方 Tailcat 端点之间使用 WireGuard 端到端加密；</li>
-          <li>实时语音、视频和屏幕媒体由浏览器 WebRTC 使用 DTLS-SRTP 加密；</li>
+          <li>一对一房间的文字、文件、语音留言以及通话信令在双方 Tailcat 端点之间使用 WireGuard 端到端加密；</li>
+          <li>多人房间中，每位成员与房主之间的控制及文字链路使用 WireGuard 加密；文件和语音留言通过加密 Tailcat 链路直接发送给所选接收者，不经过房主浏览器；</li>
+          <li>仅一对一房间提供实时语音、视频和屏幕媒体，并由浏览器 WebRTC 使用 DTLS-SRTP 加密；</li>
           <li>网站为静态应用，无账号、消息数据库、文件托管、聊天历史、离线队列或内容恢复；</li>
           <li>收到文件必须由接收者确认，不应自动打开或预览；完整传输应校验声明大小和 SHA-256。iOS 上通过校验的 OPFS 临时文件仍需用户再次操作才能导出。</li>
         </ul>
@@ -55,7 +56,8 @@
         <ul>
           <li><strong>元数据：</strong>Cloudflare Pages 可处理网页访问元数据；DERP 可观察双方 IP、连接时间、区域、流量大小和模式；</li>
           <li><strong>WebRTC 地址：</strong>通信对端、STUN 服务和相关网络运营方可能看到你的公网 IP 与连接候选；</li>
-          <li><strong>身份：</strong>持有邀请的人可能连接。加密地址不是实名认证，项目没有账号或身份验证；</li>
+          <li><strong>多人房主：</strong>群聊文字由房主读取、排序并转发，因此必须信任房主；这不是对房主隐藏内容的群组端到端加密。房主还可看到昵称、随机成员短码、成员关系、文件大小和接收者；</li>
+          <li><strong>身份：</strong>持有邀请的人可能连接或申请加入。加密地址、可重名昵称和随机成员短码都不是实名认证，项目没有账号或身份验证；</li>
           <li><strong>终端：</strong>恶意软件、浏览器扩展、操作系统、剪贴板、下载目录、截图、录屏和肩窥可在加密边界之外获取数据；</li>
           <li><strong>对端行为：</strong>对方可以保存、复制、转发或重新录制其收到的内容；</li>
           <li><strong>文件安全：</strong>本站不做病毒扫描、沙箱执行、内容审核或文件真实性验证。</li>
@@ -63,20 +65,20 @@
 
         <h2>3. 安全使用建议</h2>
         <ol>
-          <li>只通过已验证的可信渠道发送完整邀请链接，并在其他渠道确认通信对象；</li>
+          <li>只通过已验证的可信渠道发送完整邀请链接，并在其他渠道确认通信对象；多人房主应逐项核对加入申请，并在邀请外泄时立即轮换；</li>
           <li>不要公开发布房间地址，不要把持久地址用于陌生人或长期敏感用途；</li>
           <li>保持浏览器和操作系统更新，仅使用受支持的桌面 Chrome/Edge、Android Chrome 132+ 或 iOS Safari 17+；</li>
           <li>收到文件时核对发送者、文件名、大小和用途，再保存并用本地安全软件检查；</li>
-          <li>使用后关闭房间。若保存过地址，使用“忘记地址”并在需要时清除本站数据；</li>
+          <li>使用后关闭房间。多人房主离开会为所有人解散房间且不会转移房主；若保存过一对一地址，使用“忘记地址”并在需要时清除本站数据；</li>
           <li>屏幕共享前关闭通知和敏感窗口，结束后确认浏览器的共享指示器消失；</li>
           <li>为重要数据保留原始副本和独立备份，不把传输成功提示当作唯一存档。</li>
         </ol>
 
         <h2>4. 网络与可用性</h2>
-        <p>浏览器 Tailcat 当前经公共 DERP 中继传输，公开节点限速、尽力而为、无可用性或吞吐量 SLA。实时通话只配置 STUN，不配置 TURN；在对称 NAT、防火墙或企业网络下可能失败。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。本测试版没有后台传输或断点续传；返回前台后会检查会话，失效时必须重新连接。</p>
+        <p>浏览器 Tailcat 当前经公共 DERP 中继传输，公开节点限速、尽力而为、无可用性或吞吐量 SLA。一对一实时通话只配置 STUN，不配置 TURN；在对称 NAT、防火墙或企业网络下可能失败。网络中断、页面进入后台、设备休眠或内存压力都可能终止传输。本测试版没有后台文件传输或文件断点续传。已加入的多人成员可在 120 秒内尝试恢复房主内存中最多 100 条或 8 MiB 的事件；缓冲不足会显示消息缺口。房主页面关闭或刷新会立即解散房间。</p>
 
         <h2>5. 浏览器与本地密钥</h2>
-        <p>正式支持桌面 Chrome 和 Edge；Android Chrome 132+ 与 iOS Safari 17+ 为测试支持并应保持前台。iOS Chrome、Android Edge、Samsung Internet、Firefox、桌面 Safari 和其他浏览器不属于本版正式目标；若核心能力完整，应用可能提供明确标记的受限模式，但不作兼容性承诺。临时密钥在页面关闭或超时后停止使用；主动保存的地址私钥只应进入本站来源的 IndexedDB，并可由用户忘记或通过清除站点数据删除。存储不可用时应用必须退回临时地址。</p>
+        <p>正式支持桌面 Chrome 和 Edge；Android Chrome 132+ 与 iOS Safari 17+ 为测试支持并应保持前台。手机创建多人房间前必须确认保持页面前台和屏幕唤醒；离开前台会暂停加入与发送，120 秒内未返回会为所有人关闭房间。唤醒锁不能保证后台运行。iOS Chrome、Android Edge、Samsung Internet、Firefox、桌面 Safari 和其他浏览器不属于本版正式目标；若核心能力完整，应用可能提供明确标记的受限模式，但不作兼容性承诺。一对一临时密钥在页面关闭或超时后停止使用；主动保存的一对一地址私钥只应进入本站来源的 IndexedDB。多人房间始终使用临时地址，不复用该密钥。</p>
         <p>Android 文件接收写入用户选择的位置。iOS 文件接收先写入本站来源的 OPFS 临时项，并要求在开始前估算足够的文件空间与安全余量；无法估算、空间不足或私密浏览禁用 OPFS 时，不接收文件。OPFS 临时存储不是云端备份，导出成功、用户取消分享或传输失败后应删除；其他系统分享错误会保留可供本地下载或手动删除的副本。仍应避免把重要文件的唯一副本交给浏览器存储。</p>
 
         <h2>6. 报告安全问题</h2>
@@ -84,7 +86,7 @@
         <p>本项目暂不承诺漏洞赏金、响应时间或安全港。测试应遵守法律、<a href="/acceptable-use/">可接受使用政策</a>，并避免自动扫描、拒绝服务、持久化访问或接触其他用户内容。</p>
 
         <h2>7. 滥用事件</h2>
-        <p>若是骚扰、恶意文件、非法内容或其他使用问题，也请联系 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。由于内容端到端加密且无账号或历史数据库，可调查证据有限。紧迫危险请联系当地紧急服务。</p>
+        <p>若是骚扰、恶意文件、非法内容或其他使用问题，也请联系 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。由于本站运营方无法读取传输内容，且服务无账号或历史数据库，可调查证据有限；多人房主能看到群聊文字不代表运营方能看到。紧迫危险请联系当地紧急服务。</p>
       </section>
 
       <section class="language-column" lang="en">
@@ -92,8 +94,9 @@
 
         <h2>1. What is protected</h2>
         <ul>
-          <li>Text, files, voice notes, and call signaling use WireGuard end-to-end encryption between Tailcat endpoints;</li>
-          <li>Live audio, video, and display media is encrypted by browser WebRTC with DTLS-SRTP;</li>
+          <li>Private-room text, files, voice notes, and call signaling use WireGuard end-to-end encryption between the two Tailcat endpoints;</li>
+          <li>In a group room, each member-to-host control and text link uses WireGuard encryption; files and voice notes travel over encrypted Tailcat links directly to selected recipients without passing through the host browser;</li>
+          <li>Live audio, video, and display media is available only in private rooms and is encrypted by browser WebRTC with DTLS-SRTP;</li>
           <li>The site is static and has no account, message database, file hosting, chat history, offline queue, or content recovery; and</li>
           <li>A received file must be approved by the recipient and should not be opened or previewed automatically; a complete transfer should verify declared size and SHA-256. On iOS, a verified OPFS temporary file still requires another user action to export.</li>
         </ul>
@@ -102,7 +105,8 @@
         <ul>
           <li><strong>Metadata:</strong> Cloudflare Pages can process site-access metadata; DERP can observe peer IPs, connection time, region, traffic volume, and traffic patterns;</li>
           <li><strong>WebRTC addresses:</strong> Your peer, the STUN service, and relevant network operators may see your public IP address and connection candidates;</li>
-          <li><strong>Identity:</strong> A person holding an invitation may connect. An encrypted address is not verified identity, and the project has no account or identity service;</li>
+          <li><strong>Group host:</strong> The host reads, orders, and relays group text, so members must trust the host; this is not host-blind group end-to-end encryption. The host can also see nicknames, random member codes, membership, file sizes, and recipients;</li>
+          <li><strong>Identity:</strong> A person holding an invitation may connect or request admission. An encrypted address, duplicate-capable nickname, or random member code is not verified identity, and the project has no account or identity service;</li>
           <li><strong>Endpoints:</strong> Malware, browser extensions, the operating system, clipboard, downloads, screenshots, recordings, and shoulder surfing can expose data outside the encryption boundary;</li>
           <li><strong>Peer behavior:</strong> A peer can save, copy, forward, or re-record anything received; and</li>
           <li><strong>File safety:</strong> The site performs no malware scan, sandbox execution, content moderation, or authenticity check.</li>
@@ -110,20 +114,20 @@
 
         <h2>3. Safer use</h2>
         <ol>
-          <li>Send a complete invitation only through a verified, trusted channel, and confirm your intended peer out of band;</li>
+          <li>Send a complete invitation only through a verified, trusted channel and confirm intended participants out of band; group hosts should inspect each request and rotate a leaked invitation immediately;</li>
           <li>Do not post room addresses publicly or reuse a persistent address with strangers or for long-lived sensitive work;</li>
           <li>Keep the browser and operating system current, and use supported desktop Chrome/Edge, Android Chrome 132+, or iOS Safari 17+;</li>
           <li>Before saving a file, confirm its sender, name, size, and purpose, then inspect it with local security software;</li>
-          <li>Close the room after use. If you saved an address, use “forget address” and clear site data when appropriate;</li>
+          <li>Close the room after use. A group host leaving ends the room for everyone with no host transfer. If you saved a private-room address, use “forget address” and clear site data when appropriate;</li>
           <li>Before screen sharing, close notifications and sensitive windows, and verify the browser's sharing indicator is gone afterward; and</li>
           <li>Keep originals and independent backups of important data; never treat a transfer-success message as your only archive.</li>
         </ol>
 
         <h2>4. Network and availability</h2>
-        <p>Browser Tailcat traffic currently uses public DERP relays, which are rate-limited, best-effort, and have no uptime or throughput SLA. Live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent a call. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer. This beta has no background transfer or resume; it checks the session on return and requires reconnection after loss.</p>
+        <p>Browser Tailcat traffic currently uses public DERP relays, which are rate-limited, best-effort, and have no uptime or throughput SLA. Private-room live calls configure STUN only, with no TURN fallback, so symmetric NAT, firewalls, or enterprise networks can prevent a call. Network loss, backgrounded pages, device sleep, or memory pressure can terminate a transfer. This beta has no background file transfer or file resume. An existing group member can attempt a 120-second reconnect using at most 100 events or 8 MiB still in the host's memory; a missing range is reported as a message gap. Closing or refreshing the host page immediately ends the room.</p>
 
         <h2>5. Browsers and local keys</h2>
-        <p>Desktop Chrome and Edge are supported; Android Chrome 132+ and iOS Safari 17+ are foreground-only beta targets. iOS Chrome, Android Edge, Samsung Internet, Firefox, desktop Safari, and other browsers are not release targets. When their core capabilities are complete, the app may offer an explicitly limited mode without a compatibility commitment. Ephemeral keys stop being used when the page closes or times out. A deliberately remembered address key should exist only in this origin's IndexedDB and can be removed with “forget address” or by clearing site data; when storage is unavailable, the app must fall back to an ephemeral address.</p>
+        <p>Desktop Chrome and Edge are supported; Android Chrome 132+ and iOS Safari 17+ are foreground-only beta targets. Hosting a group on a phone requires acknowledging that the page and screen must remain in the foreground. Backgrounding pauses joins and sends; failure to return within 120 seconds ends the room for everyone. A wake lock cannot guarantee background operation. iOS Chrome, Android Edge, Samsung Internet, Firefox, desktop Safari, and other browsers are not release targets. When their core capabilities are complete, the app may offer an explicitly limited mode without a compatibility commitment. Private-room ephemeral keys stop being used when the page closes or times out. A deliberately remembered private-room address key should exist only in this origin's IndexedDB; group rooms always use ephemeral addresses and do not reuse that key.</p>
         <p>Android file receive writes to a destination the user selects. iOS file receive first writes to an origin-private OPFS temporary entry and requires an estimated file-size allowance plus a safety margin before accepting bytes. It refuses receive when estimation fails, space is insufficient, or private browsing disables OPFS. OPFS is not a cloud backup; the temporary entry should be removed after export, user-cancelled sharing, or transfer failure. Other system-share errors retain a copy for local download or manual deletion, and important data must retain an independent original.</p>
 
         <h2>6. Reporting a security issue</h2>
@@ -131,7 +135,7 @@
         <p>The project does not currently promise a bounty, response time, or safe harbor. Testing must follow the law and <a href="/acceptable-use/">Acceptable Use Policy</a> and avoid automated scanning, denial of service, persistent access, or access to another user's content.</p>
 
         <h2>7. Abuse incidents</h2>
-        <p>For harassment, malicious files, illegal content, or other use issues, also contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>. End-to-end encryption and the absence of accounts or a history database limit available evidence. Contact local emergency services for immediate danger.</p>
+        <p>For harassment, malicious files, illegal content, or other use issues, also contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>. The operator's inability to read transferred content and the absence of accounts or a history database limit available evidence; a group host's access to group text does not give the operator that access. Contact local emergency services for immediate danger.</p>
       </section>
     </div>
   </main>

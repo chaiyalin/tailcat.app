@@ -4,13 +4,66 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"os"
+	"slices"
+	"strings"
 	"syscall/js"
 	"testing"
 	"time"
 )
+
+func TestReleaseVersionSourcesAgree(t *testing.T) {
+	const expected = "0.3.0-beta.1"
+	type manifest struct {
+		Version  string              `json:"version"`
+		Packages map[string]manifest `json:"packages"`
+	}
+
+	read := func(name string) []byte {
+		t.Helper()
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return contents
+	}
+	decode := func(name string) manifest {
+		t.Helper()
+		var value manifest
+		if err := json.Unmarshal(read(name), &value); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		return value
+	}
+
+	packageJSON := decode("package.json")
+	packageLock := decode("package-lock.json")
+	versions := map[string]string{
+		"package.json":              packageJSON.Version,
+		"package-lock.json":         packageLock.Version,
+		"package-lock root package": packageLock.Packages[""].Version,
+	}
+	for source, version := range versions {
+		if version != expected {
+			t.Errorf("%s version = %q; want %q", source, version, expected)
+		}
+	}
+	config := string(read("web/config.js"))
+	if !strings.Contains(config, `version: "`+expected+`"`) {
+		t.Errorf("web/config.js does not expose %q", expected)
+	}
+	readme := string(read("README.md"))
+	if !strings.Contains(readme, "Release target `"+expected+"`") {
+		t.Errorf("README.md does not declare release target %q", expected)
+	}
+	if !strings.Contains(readme, "tag `app-v"+expected+"`") {
+		t.Errorf("README.md does not declare tag app-v%s", expected)
+	}
+}
 
 func TestIncrementalSHA256(t *testing.T) {
 	h := js.ValueOf(tailcatNewSHA256(js.Undefined(), nil))
@@ -39,6 +92,40 @@ func TestIncrementalSHA256(t *testing.T) {
 	}
 
 	h.Get("close").Invoke()
+}
+
+func TestSHA256CloseUsesNativeShimsAcrossCycles(t *testing.T) {
+	const cycles = 64
+	chunk := js.Global().Get("Uint8Array").New(3)
+	if copied := js.CopyBytesToJS(chunk, []byte("abc")); copied != 3 {
+		t.Fatalf("CopyBytesToJS copied %d bytes, want 3", copied)
+	}
+
+	for cycle := 0; cycle < cycles; cycle++ {
+		h := js.ValueOf(tailcatNewSHA256(js.Undefined(), nil))
+		if _, err := awaitPromise(h.Get("update").Invoke(chunk)); err != nil {
+			t.Fatalf("cycle %d update: %v", cycle, err)
+		}
+		h.Get("close").Invoke()
+
+		if !h.Get("close").Equal(js.Global().Get("Boolean")) {
+			t.Fatalf("cycle %d close did not become the native idempotent shim", cycle)
+		}
+		if got := h.Get("close").Invoke(); got.Type() != js.TypeBoolean || got.Bool() {
+			t.Fatalf("cycle %d second close = %v; want false from Boolean()", cycle, got)
+		}
+		for _, method := range []string{"update", "digestHex"} {
+			var promise js.Value
+			if method == "update" {
+				promise = h.Get(method).Invoke(chunk)
+			} else {
+				promise = h.Get(method).Invoke()
+			}
+			if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), "closed") {
+				t.Fatalf("cycle %d %s after close error = %v; want closed rejection", cycle, method, err)
+			}
+		}
+	}
 }
 
 func TestOptRegionID(t *testing.T) {
@@ -89,10 +176,120 @@ func TestJSConnWritesAllAndClosesIdempotently(t *testing.T) {
 	}
 }
 
+func TestJSConnReadHonorsOptionalMaximum(t *testing.T) {
+	c := &limitedReadConn{data: []byte("abcdefgh")}
+	wrapped := makeJSConn(c, 104, nil)
+	read := func(args ...any) (js.Value, error) {
+		t.Helper()
+		return awaitPromise(wrapped.Get("read").Invoke(args...))
+	}
+	bytesFromJS := func(value js.Value) string {
+		t.Helper()
+		if !value.InstanceOf(js.Global().Get("Uint8Array")) {
+			t.Fatalf("read value type = %v; want Uint8Array", value.Type())
+		}
+		got := make([]byte, value.Get("byteLength").Int())
+		if copied := js.CopyBytesToGo(got, value); copied != len(got) {
+			t.Fatalf("CopyBytesToGo copied %d bytes, want %d", copied, len(got))
+		}
+		return string(got)
+	}
+
+	first, err := read(3)
+	if err != nil {
+		t.Fatalf("read(3): %v", err)
+	}
+	if got := bytesFromJS(first); got != "abc" {
+		t.Fatalf("read(3) = %q, want %q", got, "abc")
+	}
+	second, err := read()
+	if err != nil {
+		t.Fatalf("read(): %v", err)
+	}
+	if got := bytesFromJS(second); got != "defgh" {
+		t.Fatalf("read() = %q, want %q", got, "defgh")
+	}
+	eof, err := read(js.Undefined())
+	if err != nil {
+		t.Fatalf("read(undefined): %v", err)
+	}
+	if eof.Type() != js.TypeNull {
+		t.Fatalf("read at EOF = %v, want null", eof)
+	}
+	if got, want := c.readBufferSizes, []int{3, 64 << 10, 64 << 10}; !slices.Equal(got, want) {
+		t.Fatalf("read buffer sizes = %v, want %v", got, want)
+	}
+
+	for _, bad := range []any{0, -1, 1.5, (64 << 10) + 1, "3", js.Null()} {
+		if _, err := read(bad); err == nil || !strings.Contains(err.Error(), "read maximum") {
+			t.Errorf("read(%v) error = %v; want maximum validation rejection", bad, err)
+		}
+	}
+	if _, err := read(1, 2); err == nil || !strings.Contains(err.Error(), "at most one") {
+		t.Errorf("read(1, 2) error = %v; want arity rejection", err)
+	}
+	wrapped.Get("close").Invoke()
+}
+
+func TestJSConnCloseUsesNativeShimsAcrossCycles(t *testing.T) {
+	const cycles = 64
+	payload := js.Global().Get("Uint8Array").New(1)
+	if copied := js.CopyBytesToJS(payload, []byte{0x5a}); copied != 1 {
+		t.Fatalf("CopyBytesToJS copied %d bytes, want 1", copied)
+	}
+
+	for cycle := 0; cycle < cycles; cycle++ {
+		connection := &shortWriteConn{}
+		closedCallbacks := 0
+		wrapped := makeJSConn(connection, 104, func() { closedCallbacks++ })
+		wrapped.Get("close").Invoke()
+
+		if !connection.closed || closedCallbacks != 1 {
+			t.Fatalf("cycle %d closed = %v, callbacks = %d; want true, 1", cycle, connection.closed, closedCallbacks)
+		}
+		if !wrapped.Get("close").Equal(js.Global().Get("Boolean")) {
+			t.Fatalf("cycle %d close did not become the native idempotent shim", cycle)
+		}
+		if got := wrapped.Get("close").Invoke(); got.Type() != js.TypeBoolean || got.Bool() {
+			t.Fatalf("cycle %d second close = %v; want false from Boolean()", cycle, got)
+		}
+
+		operations := []struct {
+			name    string
+			promise js.Value
+		}{
+			{name: "read", promise: wrapped.Get("read").Invoke()},
+			{name: "write", promise: wrapped.Get("write").Invoke(payload)},
+			{name: "closeWrite", promise: wrapped.Get("closeWrite").Invoke()},
+		}
+		for _, operation := range operations {
+			if _, err := awaitPromise(operation.promise); err == nil || !strings.Contains(err.Error(), "closed") {
+				t.Fatalf("cycle %d %s after close error = %v; want closed rejection", cycle, operation.name, err)
+			}
+		}
+	}
+}
+
 type shortWriteConn struct {
 	written     []byte
 	closed      bool
 	writeClosed bool
+}
+
+type limitedReadConn struct {
+	shortWriteConn
+	data            []byte
+	readBufferSizes []int
+}
+
+func (c *limitedReadConn) Read(p []byte) (int, error) {
+	c.readBufferSizes = append(c.readBufferSizes, len(p))
+	if len(c.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.data)
+	c.data = c.data[n:]
+	return n, nil
 }
 
 func (c *shortWriteConn) Read([]byte) (int, error) { return 0, io.EOF }
