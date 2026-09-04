@@ -346,7 +346,6 @@ test("stages an iOS OPFS receive under an opaque id and deletes the local copy",
   });
   const incoming = receiver.locator(".incoming-transfer", { hasText: name });
   await expect(incoming).toBeVisible();
-  await incoming.locator(".save-file").click();
 
   await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvDone)).toBe(true);
   await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvBytes)).toBe(contents.length);
@@ -402,6 +401,7 @@ test("keeps Safari private-mode rooms usable while disabling only file receive",
   const peer = await context.newPage();
   await peer.addInitScript(() => {
     globalThis.__privateModePeerSave = { bytes: 0, closed: false };
+    Object.defineProperty(navigator, "storage", { configurable: true, value: undefined });
     Object.defineProperty(globalThis, "showSaveFilePicker", {
       configurable: true,
       value: async () => ({

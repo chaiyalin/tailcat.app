@@ -28,6 +28,15 @@ export const APP_CONFIG = Object.freeze({
   limits: Object.freeze({
     textBytes: 64 * 1024,
     fileBytes: 1024 * 1024 * 1024,
+    // Private-room files at or below this boundary may be accepted directly
+    // into origin-private temporary storage. Larger files still require an
+    // explicit save decision from the recipient.
+    privateFileAutoReceiveBytes: 100 * 1024 * 1024,
+    // Automatic receipt is intentionally bounded across one authenticated
+    // private session so a peer cannot create unbounded staged entries or
+    // silently consume the browser's entire origin quota.
+    privateFileAutoReceiveSessionBytes: 500 * 1024 * 1024,
+    privateFileAutoReceiveSessionItems: 20,
     voiceBytes: 10 * 1024 * 1024,
     voiceSeconds: 120,
     fileChunkBytes: 64 * 1024,

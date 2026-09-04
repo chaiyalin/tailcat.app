@@ -201,7 +201,6 @@ test("deletes a verified OPFS file when the user cancels system sharing", async 
     buffer: Buffer.from("verified before share cancellation"),
   });
   const incoming = receiver.locator(".incoming-transfer", { hasText: "cancelled-share.txt" });
-  await incoming.locator(".save-file").click();
   await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvDone)).toBe(true);
   await expect.poll(() => countStagedFiles(receiver)).toBe(1);
 

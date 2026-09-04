@@ -214,6 +214,7 @@ const tcTest = {
     version: APP_CONFIG.protocolVersion,
     file: "TCF1",
     chunkBytes: APP_CONFIG.limits.fileChunkBytes,
+    privateFileAutoReceiveBytes: APP_CONFIG.limits.privateFileAutoReceiveBytes,
     ports: APP_CONFIG.ports,
   }),
 };
@@ -391,6 +392,31 @@ function validFileSize(size) {
   return Number.isSafeInteger(size) && size >= 0 && size <= APP_CONFIG.limits.fileBytes;
 }
 
+function resetPrivateAutoReceiveBudget(session = "") {
+  privateAutoReceiveBudget = { session, bytes: 0, items: 0 };
+}
+
+function canAutoReceivePrivateFile(size, session) {
+  return Number.isSafeInteger(size)
+    && size >= 0
+    && size <= APP_CONFIG.limits.privateFileAutoReceiveBytes
+    && privateAutoReceiveBudget.session === session
+    && privateAutoReceiveBudget.items < APP_CONFIG.limits.privateFileAutoReceiveSessionItems
+    && privateAutoReceiveBudget.bytes + size <= APP_CONFIG.limits.privateFileAutoReceiveSessionBytes
+    && stagedTransferItems.size < APP_CONFIG.limits.privateFileAutoReceiveSessionItems
+    && fileSinkSupport.opfs.receivable === true
+    && Number(fileSinkSupport.opfs.maxBytes) >= size;
+}
+
+function consumePrivateAutoReceiveBudget(size, session) {
+  if (privateAutoReceiveBudget.session !== session) return false;
+  if (privateAutoReceiveBudget.items >= APP_CONFIG.limits.privateFileAutoReceiveSessionItems
+    || privateAutoReceiveBudget.bytes + size > APP_CONFIG.limits.privateFileAutoReceiveSessionBytes) return false;
+  privateAutoReceiveBudget.items += 1;
+  privateAutoReceiveBudget.bytes += size;
+  return true;
+}
+
 function setStatus(message, state = "loading") {
   $("status").textContent = message;
   $("status-dot").className = `status-dot ${state}`;
@@ -448,6 +474,9 @@ async function refreshFileSinkSupport() {
     maxBytes: fileSinkSupport.maxBytes,
     picker: fileSinkSupport.picker.supported,
     opfs: fileSinkSupport.opfs.receivable,
+    privateAutoReceiveMaxBytes: fileSinkSupport.opfs.receivable
+      ? Math.min(APP_CONFIG.limits.privateFileAutoReceiveBytes, fileSinkSupport.opfs.maxBytes)
+      : 0,
   };
   renderRuntimeCapabilityNote();
   return fileSinkSupport;
@@ -921,6 +950,7 @@ let localAddress = "";
 let activePeerAddress = "";
 let activePeerNonce = "";
 let activeSession = "";
+let privateAutoReceiveBudget = { session: "", bytes: 0, items: 0 };
 let peerCapabilities = null;
 let pendingPeerAddress = "";
 let pendingHandshakeNonce = "";
@@ -1225,6 +1255,7 @@ function renderGroupState(snapshot) {
     composerHint.dataset.i18n = key;
     composerHint.textContent = t(key);
   }
+  $("private-file-auto-note").classList.toggle("hidden", active);
   $("group-room-panel").classList.toggle("hidden", !admitted);
   $("group-wake-lock-alert").classList.toggle(
     "hidden",
@@ -1605,6 +1636,7 @@ function clearPeer() {
   activePeerAddress = "";
   activePeerNonce = "";
   activeSession = "";
+  resetPrivateAutoReceiveBudget();
   peerCapabilities = null;
   if (handshakeWaiter) {
     settleHandshake(new Error("room closed"));
@@ -1950,6 +1982,7 @@ async function stopRoom({ idle = false } = {}) {
 function setPeerConnected(address, session, capabilities, nonce = "") {
   activePeerAddress = address;
   activeSession = session;
+  resetPrivateAutoReceiveBudget(session);
   activePeerNonce = nonce;
   peerCapabilities = validCapabilities(capabilities);
   lastAuthenticatedPeerTrafficAt = Date.now();
@@ -3640,7 +3673,9 @@ async function receiveFile(connection) {
         || !/^[0-9a-f]{32}$/u.test(offer.transferId)
         || !validFileSize(offer.size)
         || offer.chunkBytes !== APP_CONFIG.limits.fileChunkBytes) throw new Error("file offer rejected");
-      context = { mode: "private", session: activeSession, transferId: offer.transferId };
+      // Capture the authenticated session from the offer. The global session
+      // may be cleared while an automatic OPFS sink is being prepared.
+      context = { mode: "private", session: offer.session, transferId: offer.transferId };
     }
     offer.name = sanitizeFileName(offer.name);
     offer.mime = safeMime(offer.mime);
@@ -3668,8 +3703,16 @@ async function receiveFile(connection) {
       generation: groupGeneration,
     };
     activeFileTransfer = transferState;
+    let automaticReceive = false;
     const capacity = await withConnectionDeadline(connection, (async () => {
       await refreshFileSinkSupport();
+      if (context.mode === "private" && canAutoReceivePrivateFile(offer.size, context.session)) {
+        const automaticCapacity = await getReceiveCapacity(offer.size, {
+          kind: FILE_SINK_KIND.OPFS_EXPORT,
+          hardMaxBytes: APP_CONFIG.limits.fileBytes,
+        });
+        automaticReceive = automaticCapacity.ok;
+      }
       return getReceiveCapacity(offer.size, {
         kind: fileSinkSupport.preferredKind,
         hardMaxBytes: APP_CONFIG.limits.fileBytes,
@@ -3677,9 +3720,13 @@ async function receiveFile(connection) {
     })(), STREAM_READ_TIMEOUT_MS, "file capacity check timed out");
     if (activeFileTransfer !== transferState
       || transferState.cancelled
+      || (context.mode === "private" && activeSession !== context.session)
       || (context.mode === "group"
         && !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
-      throw new Error("group file offer is no longer current");
+      throw new Error("file offer is no longer current");
+    }
+    if (automaticReceive && !consumePrivateAutoReceiveBudget(offer.size, context.session)) {
+      automaticReceive = false;
     }
     const sinkKind = fileSinkSupport.preferredKind;
     if (!capacity.ok) {
@@ -3705,9 +3752,17 @@ async function receiveFile(connection) {
     const groupSender = context.mode === "group"
       ? groupController.snapshot().members.find((member) => member.id === context.senderId)
       : null;
-    ui = createIncomingTransferItem(offer, { sender: groupSender });
+    ui = createIncomingTransferItem(offer, { sender: groupSender, automaticReceive });
     if (context.mode === "group") markGroupTransferItem(ui, context.roomId);
-    const decision = await waitForIncomingFileDecision(ui, offer, connection, sinkKind, context, reader);
+    const decision = await waitForIncomingFileDecision(
+      ui,
+      offer,
+      connection,
+      sinkKind,
+      context,
+      reader,
+      { automaticReceive },
+    );
     if (decision.error) throw decision.error;
     if (!decision.accepted) return;
     sink = decision.sink;
@@ -3718,6 +3773,13 @@ async function receiveFile(connection) {
     tcTest.recvDone = false;
     tcTest.recvBytes = 0;
     tcTest.recvSha256 = null;
+    if (activeFileTransfer !== transferState
+      || transferState.cancelled
+      || (context.mode === "private" && activeSession !== context.session)
+      || (context.mode === "group"
+        && !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
+      throw new Error("file offer session changed before acceptance");
+    }
     await withConnectionDeadline(
       connection,
       connection.write(packFileJSON(FILE_FRAME.META, fileWireMeta(context, "ACCEPT"))),
@@ -3748,7 +3810,12 @@ async function receiveFile(connection) {
           dataDeadlineAt,
           "file data deadline exceeded",
         )
-        : await frameOperation;
+        : await withConnectionDeadline(
+          connection,
+          frameOperation,
+          STREAM_READ_TIMEOUT_MS,
+          "file data read timed out",
+        );
       prefetchedHeader = null;
       if (frame.kind === FILE_FRAME.CANCEL) {
         const cancel = decodeFileJSON(frame, [FILE_FRAME.CANCEL]);
@@ -3903,7 +3970,7 @@ async function receiveFile(connection) {
   }
 }
 
-function createIncomingTransferItem(offer, { sender = null } = {}) {
+function createIncomingTransferItem(offer, { sender = null, automaticReceive = false } = {}) {
   const fragment = $("incoming-file-template").content.cloneNode(true);
   i18n.apply(fragment);
   const item = fragment.querySelector("li");
@@ -3913,24 +3980,50 @@ function createIncomingTransferItem(offer, { sender = null } = {}) {
   const save = fragment.querySelector(".save-file");
   const reject = fragment.querySelector(".reject-file");
   const cancel = fragment.querySelector(".cancel-file");
+  const openFile = fragment.querySelector(".open-file");
   const exportFile = fragment.querySelector(".export-file");
   const deleteFile = fragment.querySelector(".delete-file");
   const localNote = fragment.querySelector(".transfer-local-note");
+  item.dataset.receiveMode = automaticReceive ? "automatic" : "manual";
   name.textContent = sender
     ? format("group_file_offer", { identity: groupMemberIdentity(sender), name: offer.name })
     : `${t("file_offer")}: ${offer.name}`;
-  detail.textContent = format("file_offer_detail", { name: offer.name, size: humanSize(offer.size) });
+  detail.textContent = format(automaticReceive ? "file_offer_detail_auto" : "file_offer_detail", {
+    name: offer.name,
+    size: humanSize(offer.size),
+  });
   save.textContent = fileSinkSupport.preferredKind === FILE_SINK_KIND.OPFS_EXPORT ? t("accept_receive") : t("choose_save");
   reject.textContent = t("reject");
   cancel.textContent = t("cancel");
+  openFile.textContent = t("file_open");
   exportFile.textContent = t("file_export");
   deleteFile.textContent = t("file_delete_local");
   $("transfer-list").append(fragment);
   renderTransferCount();
-  return { item, name, detail, progress, save, reject, cancel, export: exportFile, delete: deleteFile, localNote };
+  return {
+    item,
+    name,
+    detail,
+    progress,
+    save,
+    reject,
+    cancel,
+    open: openFile,
+    export: exportFile,
+    delete: deleteFile,
+    localNote,
+  };
 }
 
-function waitForIncomingFileDecision(ui, offer, connection, sinkKind, context, reader) {
+function waitForIncomingFileDecision(
+  ui,
+  offer,
+  connection,
+  sinkKind,
+  context,
+  reader,
+  { automaticReceive = false } = {},
+) {
   return new Promise((resolve) => {
     let claimed = false;
     let resolved = false;
@@ -3953,6 +4046,14 @@ function waitForIncomingFileDecision(ui, offer, connection, sinkKind, context, r
       releaseDecision();
       resolve(value);
     };
+    const createSink = (kind) => createFileSink({
+      kind,
+      transferId: offer.transferId,
+      name: offer.name,
+      size: offer.size,
+      mime: offer.mime,
+      hardMaxBytes: APP_CONFIG.limits.fileBytes,
+    });
     const rejectOffer = async (reason, label = t("file_rejected")) => {
       if (!claim()) return;
       ui.detail.textContent = label;
@@ -4017,14 +4118,7 @@ function waitForIncomingFileDecision(ui, offer, connection, sinkKind, context, r
       // This call is deliberately inside the click handler so Chrome treats it
       // as a user-initiated save decision.
       try {
-        const sink = await createFileSink({
-          kind: sinkKind,
-          transferId: offer.transferId,
-          name: offer.name,
-          size: offer.size,
-          mime: offer.mime,
-          hardMaxBytes: APP_CONFIG.limits.fileBytes,
-        });
+        const sink = await createSink(sinkKind);
         if (!claim()) {
           try { await sink.abort(); } catch (_) {}
           return;
@@ -4041,6 +4135,28 @@ function waitForIncomingFileDecision(ui, offer, connection, sinkKind, context, r
         connection.close();
       }
     };
+    if (automaticReceive) {
+      ui.save.classList.add("hidden");
+      ui.reject.classList.add("hidden");
+      ui.cancel.classList.remove("hidden");
+      ui.detail.textContent = t("file_auto_preparing");
+      void createSink(FILE_SINK_KIND.OPFS_EXPORT).then(async (sink) => {
+        if (!claim()) {
+          try { await sink.abort(); } catch (_) {}
+          return;
+        }
+        finish({ accepted: true, sink, prefetchedHeader, automatic: true });
+      }).catch(() => {
+        if (claimed || resolved) return;
+        ui.item.dataset.receiveMode = "manual-fallback";
+        ui.detail.textContent = t("file_auto_fallback");
+        ui.save.disabled = false;
+        ui.reject.disabled = false;
+        ui.save.classList.remove("hidden");
+        ui.reject.classList.remove("hidden");
+        ui.cancel.classList.add("hidden");
+      });
+    }
   });
 }
 
@@ -4056,8 +4172,12 @@ function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
       await sink.remove();
       removed = true;
       prepared.dispose();
+      ui.open.onclick = null;
       ui.export.onclick = null;
       ui.delete.onclick = null;
+      ui.open.classList.add("hidden");
+      ui.export.classList.add("hidden");
+      ui.delete.classList.add("hidden");
       transferItemCleanups.delete(ui.item);
       stagedTransferItems.delete(ui.item);
       const transferRoomId = groupTransferRooms.get(ui.item);
@@ -4083,8 +4203,20 @@ function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
     $("transfer-list").append(ui.item);
   }
   transferItemCleanups.set(ui.item, removeTemporaryFile);
+  ui.open.classList.toggle("hidden", !prepared.canOpen);
   ui.export.classList.remove("hidden");
   ui.delete.classList.remove("hidden");
+  ui.open.onclick = () => {
+    ui.open.disabled = true;
+    try {
+      prepared.open();
+    } catch (error) {
+      setStatus(t("file_open_failed"), "error");
+      reportError(error);
+    } finally {
+      ui.open.disabled = false;
+    }
+  };
   ui.export.onclick = () => {
     ui.export.disabled = true;
     if (useDownloadFallback) {
@@ -4102,6 +4234,7 @@ function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
     }
     void prepared.share().then(async () => {
       ui.detail.textContent = t("file_exported");
+      ui.open.classList.add("hidden");
       ui.export.classList.add("hidden");
       try {
         await removeTemporaryFile();
@@ -4120,6 +4253,7 @@ function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
           await removeTemporaryFile();
           ui.detail.textContent = t("file_local_deleted");
           ui.localNote.classList.add("hidden");
+          ui.open.classList.add("hidden");
           ui.export.classList.add("hidden");
           ui.delete.classList.add("hidden");
         } catch (cleanupError) {
@@ -4143,6 +4277,7 @@ function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
     void removeTemporaryFile().then(() => {
       ui.detail.textContent = t("file_local_deleted");
       ui.localNote.classList.add("hidden");
+      ui.open.classList.add("hidden");
       ui.export.classList.add("hidden");
       ui.delete.classList.add("hidden");
     }).catch((error) => {
@@ -5768,6 +5903,10 @@ async function protocolSelfTest() {
     "frame-boundaries": equalBytes(magic, TCF_MAGIC) && data.payload.length === 3 && data.payload[2] === 99 && decodedOffer.name === "safe.txt" && final.size === 3,
     "file-name": sanitizeFileName("../bad\\name\u0000.txt") === "name.txt",
     "file-sizes": validFileSize(APP_CONFIG.limits.fileBytes) && !validFileSize(APP_CONFIG.limits.fileBytes + 1),
+    "private-file-auto-boundary": APP_CONFIG.limits.privateFileAutoReceiveBytes === 100 * 1024 * 1024
+      && APP_CONFIG.limits.privateFileAutoReceiveBytes < APP_CONFIG.limits.fileBytes
+      && APP_CONFIG.limits.privateFileAutoReceiveSessionBytes === 500 * 1024 * 1024
+      && APP_CONFIG.limits.privateFileAutoReceiveSessionItems === 20,
     "voice-mime": safeVoiceMime(" AUDIO/WEBM ; CODECS=\"OPUS\" ") === "audio/webm;codecs=opus"
       && safeVoiceMime("audio/mp4;codecs=mp4a.40.2") === "audio/mp4;codecs=mp4a.40.2"
       && safeVoiceMime("audio/webm;codecs=vorbis") === ""

@@ -31,6 +31,27 @@ const DEFAULT_WORKER_URL = new URL("./opfs-worker.js", import.meta.url);
 const WORKER_REQUEST_TIMEOUT_MS = 60_000;
 const OPFS_OWNER_LOCK = "tailcat-app-opfs-owner";
 const reservedStorageIds = new Set();
+const SAFE_INLINE_MIME_TYPES = new Set([
+  "audio/aac",
+  "audio/flac",
+  "audio/m4a",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "image/avif",
+  "image/bmp",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "text/plain",
+  "video/mp4",
+  "video/ogg",
+  "video/quicktime",
+  "video/webm",
+]);
 
 let initializationPromise = null;
 let initializedState = null;
@@ -583,10 +604,29 @@ class BaseFileSink {
         canShare = false;
       }
     }
+    const ensureObjectURL = () => {
+      if (!file) throw new FileSinkError(FILE_SINK_REASON.NOT_READY, "The staged file was released.");
+      if (!globalThis.document || typeof URL.createObjectURL !== "function") {
+        throw new FileSinkError(FILE_SINK_REASON.NO_SINK, "Browser file opening is unavailable.");
+      }
+      if (!objectURL) objectURL = URL.createObjectURL(file);
+      return objectURL;
+    };
     return {
       get file() { return file; },
       name: this.name,
       canShare,
+      canOpen: SAFE_INLINE_MIME_TYPES.has(this.mime),
+      open: () => {
+        const anchor = document.createElement("a");
+        anchor.href = ensureObjectURL();
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.hidden = true;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+      },
       share: () => {
         if (!file) return Promise.reject(new FileSinkError(FILE_SINK_REASON.NOT_READY, "The staged file was released."));
         if (typeof navigator.share !== "function") {
@@ -597,14 +637,8 @@ class BaseFileSink {
         return navigator.share({ files: [file], title: this.name });
       },
       download: () => {
-        if (!file) throw new FileSinkError(FILE_SINK_REASON.NOT_READY, "The staged file was released.");
-        if (!globalThis.document || typeof URL.createObjectURL !== "function") {
-          throw new FileSinkError(FILE_SINK_REASON.NO_SINK, "Browser download is unavailable.");
-        }
-        if (objectURL) URL.revokeObjectURL(objectURL);
-        objectURL = URL.createObjectURL(file);
         const anchor = document.createElement("a");
-        anchor.href = objectURL;
+        anchor.href = ensureObjectURL();
         anchor.download = this.name;
         anchor.rel = "noopener";
         anchor.hidden = true;
@@ -689,6 +723,7 @@ class AsyncOPFSFileSink extends BaseFileSink {
     }
     try {
       await removeEntryIfPresent(this.directory, this.transferId);
+      reservedStorageIds.delete(this.transferId);
     } catch (removeError) {
       throw abortError || removeError;
     }
@@ -697,6 +732,7 @@ class AsyncOPFSFileSink extends BaseFileSink {
 
   async removeRaw() {
     await removeEntryIfPresent(this.directory, this.transferId);
+    reservedStorageIds.delete(this.transferId);
     return true;
   }
 
@@ -728,12 +764,14 @@ class WorkerOPFSFileSink extends BaseFileSink {
     return this.client.request("CLOSE", { transferId: this.transferId });
   }
 
-  abortRaw() {
-    return this.client.request("ABORT", { transferId: this.transferId });
+  async abortRaw() {
+    await this.client.request("ABORT", { transferId: this.transferId });
+    reservedStorageIds.delete(this.transferId);
   }
 
   async removeRaw() {
     await this.client.request("DELETE", { transferId: this.transferId });
+    reservedStorageIds.delete(this.transferId);
     return true;
   }
 
@@ -812,6 +850,7 @@ export async function createFileSink({
       try {
         const directory = await opfsDirectory();
         await removeEntryIfPresent(directory, storageId);
+        reservedStorageIds.delete(storageId);
       } catch (_) {}
     }
     throw fileSinkError(error);

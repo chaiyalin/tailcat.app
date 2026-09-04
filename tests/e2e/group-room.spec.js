@@ -353,6 +353,49 @@ test("one group file goes directly to selected recipients with independent outco
   await context.close();
 });
 
+test("a small group file still requires recipient consent when OPFS is available", async ({ browser }) => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const namespace = `group-file-consent-${Date.now()}`;
+  // Open the recipient first so it owns this context's OPFS lock. The policy
+  // distinction under test is group consent, not storage availability.
+  const receiver = await openMockPage(context, namespace, {
+    group: true,
+    disableSavePicker: true,
+  });
+  const { page: host, invitation } = await createGroupHost(context, namespace);
+  await requestJoin(receiver, invitation, "OPFS Receiver");
+  await approve(host, "OPFS Receiver");
+  await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.group.mode)).toBe("member");
+  expect(await receiver.evaluate(() => globalThis.tcTest.runtime.fileSink)).toMatchObject({
+    kind: "opfs-export",
+    opfs: true,
+  });
+
+  await host.locator("#group-recipient-list .group-recipient-option", { hasText: "OPFS Receiver" })
+    .locator("input").check();
+  const name = "group-consent-required.txt";
+  await host.locator("#send-file").setInputFiles({
+    name,
+    mimeType: "text/plain",
+    buffer: Buffer.from("group files remain opt-in"),
+  });
+
+  const incoming = receiver.locator(".incoming-transfer", { hasText: name });
+  await expect(incoming).toBeVisible();
+  await expect(incoming.locator(".save-file")).toBeVisible();
+  await expect(incoming.locator(".reject-file")).toBeVisible();
+  await receiver.waitForTimeout(300);
+  expect(await receiver.evaluate(() => globalThis.tcTest.recvBytes)).toBe(0);
+  await expect(incoming.locator(".save-file")).toBeVisible();
+
+  await incoming.locator(".save-file").click();
+  await expect(incoming).toHaveAttribute("data-finished", "true");
+  await expect(incoming.locator(".export-file")).toBeVisible();
+  await expect(host.locator(".transfer-item", { hasText: name }).locator('[data-status="complete"]')).toHaveCount(1);
+  await incoming.locator(".delete-file").click();
+  await context.close();
+});
+
 test("member-to-member files and voice bypass a non-recipient host", async ({ browser }) => {
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = `group-member-direct-${Date.now()}`;

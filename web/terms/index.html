@@ -26,7 +26,7 @@
     <h1>公开测试条款 / Public beta terms</h1>
     <p class="lede">这是一个无账号、无离线存储的实验性临时传输工具，提供一对一房间和最多 10 人的多人房间测试版。使用即表示你理解测试版的限制，并同意本条款与可接受使用政策。</p>
     <p class="lede" lang="en">This is an experimental, accountless temporary transfer tool with private one-to-one rooms and a Group Beta for up to 10 people, with no offline storage. By using it, you acknowledge the beta limitations and agree to these terms and the Acceptable Use Policy.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-03</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-04</p>
 
     <div class="notice warning">
       <p><strong>测试版 / Beta:</strong> 服务可能限速、中断、丢失连接、重置持久地址或发生协议不兼容；没有可用性、吞吐量、送达或数据恢复保证。The service can be rate-limited, interrupted, lose connections, reset persistent addresses, or become protocol-incompatible. There is no availability, throughput, delivery, or recovery guarantee.</p>
@@ -41,6 +41,7 @@
 
         <h2>2. 服务内容</h2>
         <p>tailcat.app 提供一对一的临时网页房间，以及最多 10 人（含房主）的多人房间测试版。一对一房间可传输文字、文件和语音留言，并尝试建立 WebRTC 语音、视频或屏幕共享。多人房间支持群聊文字、文件和语音留言，不支持实时通话或屏幕共享。服务不提供账号、身份认证、通讯录、离线文件托管、云端聊天历史、备份、恢复、内容审核或病毒扫描。</p>
+        <p>私人一对一房间中，不超过 100 MiB 的文件可在安全 OPFS 临时存储和可信容量估算可用时自动接收；每个已认证会话最多自动接收 20 个文件、累计 500 MiB，零字节文件也计一件，达到任一上限后，本会话后续文件转为手动确认，新会话重置计数。超过 100 MiB 或无法安全自动暂存时，仍须接收者确认并在支持时选择保存位置。多人文件始终由每位所选接收者分别确认。自动接收不会自动打开、预览或扫描文件；完成大小与 SHA-256 校验后，仍须由接收者点击打开、保存或分享。</p>
         <p>多人房主审批加入申请、协调群聊文字，并可移除成员、暂停加入、轮换邀请或关闭房间。房主关闭或刷新页面，或移动房主离开前台超过 120 秒，房间会为所有人解散且不转移房主。新成员看不到加入前的消息；已加入成员只能在 120 秒窗口内尝试恢复房主内存中仍保留的有限事件。</p>
         <p>持有邀请链接或 Tailcat 地址的人可能连接或申请加入。昵称未经验证、允许重名，随机成员短码也不是身份认证。链路加密不会证明参与者身份。你应通过可信渠道交换邀请，并自行确认通信对象。</p>
 
@@ -52,7 +53,7 @@
           <li>仅发送你有权发送的内容，并遵守适用法律及<a href="/acceptable-use/">可接受使用政策</a>；</li>
           <li>保护邀请链接、房间地址、加入令牌与一对一持久私钥，不在公开场所暴露；</li>
           <li>作为多人房主时，理解你是群聊文字的可信协调端，谨慎审批、移除成员并保持页面在线；</li>
-          <li>接收前确认发送者与文件用途，在本地使用可信安全工具检查文件；</li>
+          <li>即使私人小文件已自动暂存，也应在打开、保存或分享前确认发送者与文件用途，并在本地使用可信安全工具检查文件；</li>
           <li>维护安全、受支持且及时更新的浏览器与操作系统；</li>
           <li>获得语音、视频、屏幕、个人数据或受保护内容所需的同意与许可。</li>
         </ul>
@@ -87,6 +88,7 @@
 
         <h2>2. What the service does</h2>
         <p>tailcat.app provides temporary one-to-one browser rooms and a Group Beta for up to 10 people including the host. Private rooms carry text, files, and voice notes and attempt WebRTC voice, video, or screen sharing. Group rooms carry group text, files, and voice notes, but do not offer live calls or screen sharing. The service provides no account, identity verification, contact list, offline file hosting, cloud chat history, backup, recovery, content moderation, or malware scanning.</p>
+        <p>In a private one-to-one room, a file up to and including 100 MiB may be received automatically when safe OPFS temporary storage and a trustworthy capacity estimate are available. Each authenticated session can auto-receive at most 20 files and 500 MiB in total; a zero-byte file counts as one, reaching either limit makes later files in that session manual, and a new session resets the counters. A file over 100 MiB, or one that cannot be staged automatically and safely, still requires recipient approval and a selected destination where supported. Every group file always requires separate approval from each selected recipient. Automatic receive never automatically opens, previews, or scans a file; the recipient must click to open, save, or share it after size and SHA-256 verification.</p>
         <p>A group host approves join requests, coordinates group text, and can remove members, pause joining, rotate the invitation, or close the room. Closing or refreshing the host page—or leaving a mobile host in the background for more than 120 seconds—ends the room for everyone, with no host transfer. New members receive no earlier messages; existing members can only attempt a 120-second recovery from the limited events still in the host's memory.</p>
         <p>A person holding an invitation link or Tailcat address may connect or request admission. Nicknames are unverified and can be duplicated, and random member codes are not identity verification. Link encryption does not prove participant identity. Exchange invitations through a trusted channel and verify the people you intend to reach.</p>
 
@@ -98,7 +100,7 @@
           <li>Send only content you have the right to send, in compliance with applicable law and the <a href="/acceptable-use/">Acceptable Use Policy</a>;</li>
           <li>Protect invitation links, room addresses, join tokens, and private-room persistent keys from public exposure;</li>
           <li>When hosting a group, understand that you are the trusted coordinator for group text, approve and remove members carefully, and keep the page online;</li>
-          <li>Confirm the sender and purpose of a file before accepting it, and inspect it locally with trusted security tools;</li>
+          <li>Even when a small private-room file was staged automatically, confirm its sender and purpose and inspect it locally with trusted security tools before opening, saving, or sharing it;</li>
           <li>Maintain a secure, supported, and current browser and operating system; and</li>
           <li>Obtain any consent or permission required for audio, video, displays, personal data, or protected content.</li>
         </ul>

@@ -266,6 +266,7 @@
           </div>
         </div>
         <p class="composer-hint" data-i18n="composer_hint">Enter sends · Shift+Enter adds a line · hold the microphone button to record</p>
+        <p id="private-file-auto-note" class="composer-hint" data-i18n="private_file_auto_note">Private-room files up to 100 MiB are received automatically into temporary browser storage. Larger files require approval.</p>
         <p id="send-progress" class="composer-status" aria-live="polite"></p>
         <button id="send-btn" type="button" hidden disabled>Send file</button>
       </section>
@@ -366,7 +367,7 @@
   <template id="incoming-file-template">
     <li class="transfer-item incoming-transfer">
       <div class="transfer-copy"><strong class="transfer-name"></strong><span class="transfer-detail"></span><progress max="1" value="0" aria-label="Transfer progress" data-i18n-title="transfer_progress"></progress><span class="transfer-local-note hidden"></span></div>
-      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button><button class="button small primary export-file hidden" type="button"></button><button class="button small danger delete-file hidden" type="button"></button></div>
+      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button><button class="button small primary open-file hidden" type="button"></button><button class="button small primary export-file hidden" type="button"></button><button class="button small danger delete-file hidden" type="button"></button></div>
     </li>
   </template>
 

@@ -26,13 +26,13 @@
     <h1>隐私说明 / Privacy notice</h1>
     <p class="lede">我们尽量不收集数据，但“端到端加密”不等于没有网络元数据。本页说明浏览器、Cloudflare、Tailcat DERP 与 WebRTC 各自会处理什么。</p>
     <p class="lede" lang="en">We try to collect as little data as possible, but end-to-end encryption does not eliminate network metadata. This notice explains what the browser, Cloudflare, Tailcat DERP, and WebRTC each process.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-03</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-04</p>
 
     <div class="facts" aria-label="Key privacy facts">
       <div class="fact"><strong>无账号 / No accounts</strong><span>无需注册、登录或提供用户资料。</span></div>
       <div class="fact"><strong>无服务端内容存储 / No server content store</strong><span>本站没有消息、文件或语音留言数据库。</span></div>
       <div class="fact"><strong>无历史 / No history</strong><span>没有云端聊天记录、备份或离线投递队列。</span></div>
-      <div class="fact"><strong>不做病毒扫描 / No malware scanning</strong><span>接收文件前请确认发送者，并在本地检查。</span></div>
+      <div class="fact"><strong>不做病毒扫描 / No malware scanning</strong><span>自动暂存不代表文件安全；打开前请在本地检查。</span></div>
     </div>
 
     <div class="notice warning">
@@ -47,7 +47,7 @@
         <p>tailcat.app 是独立的非官方开源测试项目，不是 Tailscale Inc. 的产品，也未获得其关联或背书。隐私或滥用问题可联系 <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>。</p>
 
         <h2>2. 本站不建立哪些数据</h2>
-        <p>本站不要求账号，不建立用户档案，也没有用于保存文字、文件、语音留言、房间成员或聊天历史的服务端应用数据库。我们不提供离线投递、稍后从服务器下载、云端备份、内容恢复或病毒扫描。多人房间的成员状态和有限恢复缓冲只存在于房主浏览器内存中；iOS Safari 接收文件时可能使用仅属于本站来源的浏览器私有临时存储，具体见第 6 节。</p>
+        <p>本站不要求账号，不建立用户档案，也没有用于保存文字、文件、语音留言、房间成员或聊天历史的服务端应用数据库。我们不提供离线投递、稍后从服务器下载、云端备份、内容恢复或病毒扫描。多人房间的成员状态和有限恢复缓冲只存在于房主浏览器内存中；浏览器接收符合条件的一对一文件时可能使用仅属于本站来源的私有临时存储，具体见第 6 节。</p>
         <p>首版不加载第三方分析脚本、第三方字体或远程错误上报。Cloudflare Web Analytics 在公开测试版中关闭。多人房间诊断不得记录邀请、令牌、Tailcat 地址、昵称、消息、文件名、内容或 IP；若启用运行诊断，只允许匿名运行编号、成员数、时延、错误类别、字节数和资源计数。</p>
 
         <h2>3. 打开网页时</h2>
@@ -65,7 +65,8 @@
 
         <h2>6. 设备上的数据</h2>
         <p>一对一临时房间密钥默认只在当前页面生命周期内使用。若你主动开启“记住此地址”，私钥会保存在本站来源的 IndexedDB 中，直到你使用“忘记地址”、清除本站数据或浏览器移除它。多人房间始终使用临时地址，不使用已记住的地址。房主浏览器内存保存成员、待审批申请、会话令牌以及最多 100 条或 8 MiB 的近期事件，以便已加入成员在 120 秒内尝试恢复；关闭或刷新房主页会清除这些状态并解散房间。新成员看不到加入前的消息。</p>
-        <p>Android Chrome 会在你确认并选择系统保存位置后直接流式写入。iOS Safari 会在你确认后，以随机传输编号把文件分块写入本站来源的 Origin Private File System（OPFS），完成大小与 SHA-256 校验后，再由你主动分享到“文件”或其他应用。原始文件名不会用作 OPFS 路径。成功导出、用户取消分享、传输取消、校验失败或写入失败后，应用会删除临时副本；若系统分享因其他错误失败，临时副本会保留以便本地下载或手动删除。应用会在下次启动时清理异常退出留下的传输项；你也可以使用“删除本地副本”或清除本站数据。浏览器仍可能因崩溃、存储故障或平台限制暂时保留数据。</p>
+        <p>在私人一对一房间中，不超过 100 MiB 的文件只有在浏览器提供安全的 Origin Private File System（OPFS），且可信容量估算确认文件大小与安全余量均有足够空间时，才会自动接收至本站来源的临时存储。每个已认证的一对一会话最多自动接收 20 个文件、累计 500 MiB；零字节文件也计一件，达到任一上限后，本会话的后续文件改为手动确认，建立新的已认证会话会重置计数。超过 100 MiB、无法使用 OPFS、无法可靠估算容量或空间不足时，仍须由你确认并在浏览器支持时选择安全的系统保存位置。多人房间文件始终由每位所选接收者分别确认。</p>
+        <p>OPFS 自动接收不会把文件静默保存到系统下载目录，也不会自动打开、预览或病毒扫描。应用使用随机传输编号而非原始文件名作为 OPFS 路径；完成声明大小与 SHA-256 校验后，须由你点击打开、保存或分享。成功导出、用户取消分享、传输取消、校验失败或写入失败后，应用会删除临时副本；若系统分享因其他错误失败，临时副本会保留以便本地下载或手动删除。应用会在下次启动时清理异常退出留下的传输项；你也可以使用“删除本地副本”或清除本站数据。浏览器仍可能因崩溃、存储故障或平台限制暂时保留数据。</p>
         <p>任何通信对端都可以保存其收到的内容。我们无法从对方设备删除消息、录音、文件或截图。</p>
 
         <h2>7. 保留、控制与选择</h2>
@@ -85,7 +86,7 @@
         <p>tailcat.app is an independent, unofficial open-source beta. It is not a Tailscale Inc. product and is not affiliated with or endorsed by Tailscale. For privacy or abuse questions, contact <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>.</p>
 
         <h2>2. Data the app does not create</h2>
-        <p>The site requires no account, creates no user profile, and has no server-side application database for text, files, voice notes, room members, or chat history. We do not provide offline delivery, later server retrieval, cloud backups, content recovery, or malware scanning. Group membership state and the limited recovery buffer exist only in the host browser's memory; iOS Safari may use origin-private temporary browser storage while receiving a file, as described in section 6.</p>
+        <p>The site requires no account, creates no user profile, and has no server-side application database for text, files, voice notes, room members, or chat history. We do not provide offline delivery, later server retrieval, cloud backups, content recovery, or malware scanning. Group membership state and the limited recovery buffer exist only in the host browser's memory; a browser may use origin-private temporary storage while receiving an eligible private-room file, as described in section 6.</p>
         <p>The initial beta loads no third-party analytics scripts, remote fonts, or remote error reporting. Cloudflare Web Analytics is disabled. Group diagnostics must not record invitations, tokens, Tailcat addresses, nicknames, messages, file names, content, or IP addresses. If operational diagnostics are enabled, they are limited to an anonymous run identifier, member count, latency, error category, byte count, and resource counts.</p>
 
         <h2>3. When you open the site</h2>
@@ -103,7 +104,8 @@
 
         <h2>6. Data on your device</h2>
         <p>A private room uses an ephemeral key for the current page lifetime by default. If you enable “remember this address,” its private key is stored in IndexedDB for this origin until you choose “forget address,” clear site data, or the browser removes it. Group rooms always use an ephemeral address and never reuse a remembered address. The host browser keeps members, pending requests, session tokens, and up to 100 recent events or 8 MiB in memory so an existing member can attempt recovery within 120 seconds. Closing or refreshing the host page clears that state and ends the room. New members cannot see messages from before they joined.</p>
-        <p>Android Chrome streams an incoming file only after you approve it and choose a system destination. On iOS Safari, approval allows chunks to be written under a random transfer identifier in this origin's Origin Private File System (OPFS). After size and SHA-256 verification, a second action shares the file to Files or another app. The offered file name is never used as the OPFS path. The app deletes the temporary copy after successful export, user-cancelled sharing, transfer cancellation, verification failure, or write failure. If system sharing fails for another reason, the copy remains available for local download or manual deletion. The app cleans abandoned transfer entries on its next start and offers “delete local copy”; clearing site data also removes it. A crash, storage fault, or platform limitation may delay cleanup.</p>
+        <p>In a private one-to-one room, a file of up to and including 100 MiB is automatically received into this origin's temporary storage only when the browser provides a safe Origin Private File System (OPFS) and a trustworthy capacity estimate confirms room for the file plus the safety margin. Each authenticated private session can auto-receive at most 20 files and 500 MiB in total; a zero-byte file counts as one, reaching either limit makes later files in that session manual, and a new authenticated session resets the counters. A file over 100 MiB, or one for which OPFS, reliable estimation, or sufficient space is unavailable, still requires your approval and a safe system destination where the browser supports one. Every group-room file always requires separate approval from each selected recipient.</p>
+        <p>OPFS automatic receive does not silently save a file to the system Downloads folder, and the app never automatically opens, previews, or malware-scans it. The app uses a random transfer identifier rather than the offered file name as its OPFS path. After declared-size and SHA-256 verification, you must click to open, save, or share the file. The app deletes the temporary copy after successful export, user-cancelled sharing, transfer cancellation, verification failure, or write failure. If system sharing fails for another reason, the copy remains available for local download or manual deletion. The app cleans abandoned transfer entries on its next start and offers “delete local copy”; clearing site data also removes it. A crash, storage fault, or platform limitation may delay cleanup.</p>
         <p>Any peer can keep content they receive. We cannot delete messages, recordings, files, or screenshots from another person's device.</p>
 
         <h2>7. Retention, controls, and choices</h2>

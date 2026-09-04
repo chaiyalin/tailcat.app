@@ -609,11 +609,29 @@ export async function installMockVoiceMedia(page) {
 
 export async function openMockPage(context, namespace, {
   group = false,
+  disableOPFS = false,
+  disableSavePicker = false,
   mobileGroupHosting = false,
   previewInvites = false,
   url = "/",
 } = {}) {
   const page = await context.newPage();
+  if (disableOPFS) {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator.storage, "getDirectory", {
+        configurable: true,
+        value: undefined,
+      });
+    });
+  }
+  if (disableSavePicker) {
+    await page.addInitScript(() => {
+      Object.defineProperty(globalThis, "showSaveFilePicker", {
+        configurable: true,
+        value: undefined,
+      });
+    });
+  }
   if (group) {
     await page.addInitScript(({ mobile, preview }) => {
       globalThis.__TAILCAT_GROUP_BETA__ = true;

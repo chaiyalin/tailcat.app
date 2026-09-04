@@ -241,11 +241,11 @@ test("keeps temporary addresses ephemeral and remembered addresses stable", asyn
   }
 });
 
-test("requires a save decision and streams a 64 KiB + 1 file in two data chunks", async ({ browser }) => {
+test("uses the manual picker when OPFS is unavailable and streams a 64 KiB + 1 file in two data chunks", async ({ browser }) => {
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -301,13 +301,13 @@ test("requires a save decision and streams a 64 KiB + 1 file in two data chunks"
   }
 });
 
-test("streams 0 B, 1 B, 64 KiB, and 100 MiB boundaries without whole-file fallback", async ({ browser }) => {
+test("the manual picker streams 0 B, 1 B, 64 KiB, and 100 MiB boundaries without whole-file fallback", async ({ browser }) => {
   test.setTimeout(300_000);
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "tailcat-e2e-"));
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -352,7 +352,7 @@ test("aborts the destination when the streamed file hash is corrupted", async ({
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -384,7 +384,7 @@ test("continues the ordered file queue after one item is rejected", async ({ bro
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
