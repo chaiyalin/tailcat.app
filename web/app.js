@@ -1275,33 +1275,51 @@ function renderGroupEvent(event) {
     if (tcTest.group) tcTest.group.textEvents = groupTextEventCount;
     const member = groupMemberById(event.senderId);
     if (!member) return;
-    addMessage({
-      type: "text",
-      text: event.text,
-      mine: event.senderId === groupRoom?.memberId,
-      senderName: member.displayName,
-      senderCode: member.code,
-      senderRole: member.role,
-    });
-    if (event.senderId === groupRoom?.memberId) {
-      const submitted = pendingGroupDrafts.get(event.clientEventId);
+    const mine = event.senderId === groupRoom?.memberId;
+    const submitted = mine ? pendingGroupDrafts.get(event.clientEventId) : null;
+    if (submitted?.roomId === groupRoom?.roomId && submitted.text === event.text) {
       pendingGroupDrafts.delete(event.clientEventId);
-      if (submitted
-        && submitted.revision === groupDraftRevision
-        && $("send-text").value === submitted.text) {
-        $("send-text").value = "";
-        groupDraftRevision += 1;
+      if (isRenderedMessage(submitted.message)) {
+        updateMessageDelivery(submitted.message, "delivered");
+      } else {
+        addMessage({
+          type: "text",
+          text: event.text,
+          mine: true,
+          senderName: member.displayName,
+          senderCode: member.code,
+          senderRole: member.role,
+          deliveryState: "delivered",
+          deliveryContext: "group",
+          groupOrdered: true,
+        });
       }
       setStatus(t("group_message_committed"), "connected");
+    } else {
+      if (submitted) {
+        pendingGroupDrafts.delete(event.clientEventId);
+        updateMessageDelivery(submitted.message, "failed");
+      }
+      addMessage({
+        type: "text",
+        text: event.text,
+        mine,
+        senderName: member.displayName,
+        senderCode: member.code,
+        senderRole: member.role,
+        deliveryState: mine ? "delivered" : "",
+        deliveryContext: mine ? "group" : "",
+        groupOrdered: true,
+      });
     }
     return;
   }
   const member = event.member || groupMemberById(event.memberId);
   const identity = groupMemberIdentity(member);
   if (event.type === "MEMBER_JOINED" && event.member?.id !== groupRoom?.memberId) {
-    addMessage({ type: "system", text: format("group_system_joined", { identity }) });
+    addMessage({ type: "system", text: format("group_system_joined", { identity }), groupOrdered: true });
   } else if (event.type === "MEMBER_LEFT") {
-    addMessage({ type: "system", text: format("group_system_left", { identity }) });
+    addMessage({ type: "system", text: format("group_system_left", { identity }), groupOrdered: true });
   }
 }
 
@@ -1313,8 +1331,13 @@ function handleGroupStatus(code, detail = {}) {
   } else if (code === "ADDRESS_VERIFYING") {
     $("group-waiting-status").textContent = t("group_callback_verifying");
   } else if (code === "RECOVERING" || code === "RECOVERY_RETRY") {
+    updatePendingGroupMessages("reconnecting");
     $("group-room-status").textContent = t("group_status_reconnecting");
     setStatus(t("group_status_reconnecting"), "loading");
+  } else if (code === "RECOVERED") {
+    updatePendingGroupMessages("sending");
+  } else if (code === "ACTION_REJECTED" && detail.requestId) {
+    failPendingGroupMessage(detail.requestId, detail.reason || "REJECTED");
   } else if (code === "MESSAGE_GAP") {
     addMessage({ type: "system", text: t("group_message_gap") });
     setStatus(t("group_message_gap"), "error");
@@ -1578,6 +1601,7 @@ function clearPeer() {
   cancelActiveVoiceRecording();
   stopPeerHeartbeat();
   lastAuthenticatedPeerTrafficAt = 0;
+  if (activeSession) closePrivateTextQueue(activeSession);
   activePeerAddress = "";
   activePeerNonce = "";
   activeSession = "";
@@ -2359,10 +2383,140 @@ function receiveHelloReject(meta) {
 
 const renderedMessages = [];
 let renderedMessageBytes = 0;
-let groupDraftRevision = 0;
+let renderedMessageOrdinal = 0;
 const pendingGroupDrafts = new Map();
+const privateTextQueues = new Map();
+let sendButtonFeedbackTimer = null;
 
-async function sendText() {
+function privateTextQueueFor(session, peerAddress) {
+  let queue = privateTextQueues.get(session);
+  if (queue && queue.peerAddress !== peerAddress) {
+    closePrivateTextQueue(session);
+    queue = null;
+  }
+  if (!queue) {
+    queue = {
+      session,
+      peerAddress,
+      tail: Promise.resolve(),
+      frames: 0,
+      bytes: 0,
+      pending: new Set(),
+      closed: false,
+    };
+    privateTextQueues.set(session, queue);
+  }
+  return queue;
+}
+
+function closePrivateTextQueue(session) {
+  const queue = privateTextQueues.get(session);
+  if (!queue) return;
+  queue.closed = true;
+  for (const message of queue.pending) updateMessageDelivery(message, "failed");
+  if (queue.frames === 0) privateTextQueues.delete(session);
+}
+
+function clearSubmittedText() {
+  const input = $("send-text");
+  input.value = "";
+  try {
+    input.focus({ preventScroll: true });
+  } catch (_) {
+    input.focus();
+  }
+}
+
+function showQueuedSendFeedback() {
+  const button = $("send-text-btn");
+  button.classList.add("queued");
+  button.dataset.feedback = "queued";
+  clearTimeout(sendButtonFeedbackTimer);
+  sendButtonFeedbackTimer = setTimeout(() => {
+    button.classList.remove("queued");
+    delete button.dataset.feedback;
+  }, 600);
+}
+
+function deliveryStatusKey(state, context) {
+  if (state === "sending") return "message_pending";
+  if (state === "reconnecting") return "message_retrying";
+  if (state === "failed") return "message_send_failed";
+  if (state === "delivered") return context === "group" ? "group_message_committed" : "message_delivered";
+  return "";
+}
+
+function isRenderedMessage(message) {
+  return Boolean(message && renderedMessages.includes(message) && message.article?.isConnected);
+}
+
+function insertRenderedMessage(message) {
+  const history = $("history");
+  if (message.groupOrdered && !message.localOnly) {
+    const localIndex = renderedMessages.findIndex((candidate) => candidate.localOnly);
+    if (localIndex >= 0) {
+      history.insertBefore(message.article, renderedMessages[localIndex].article);
+      renderedMessages.splice(localIndex, 0, message);
+      return;
+    }
+  }
+  history.append(message.article);
+  renderedMessages.push(message);
+}
+
+function moveMessageToCommittedTail(message) {
+  const currentIndex = renderedMessages.indexOf(message);
+  if (currentIndex < 0) return;
+  renderedMessages.splice(currentIndex, 1);
+  const localIndex = renderedMessages.findIndex((candidate) => candidate.localOnly);
+  if (localIndex >= 0) {
+    $("history").insertBefore(message.article, renderedMessages[localIndex].article);
+    renderedMessages.splice(localIndex, 0, message);
+    return;
+  }
+  $("history").append(message.article);
+  renderedMessages.push(message);
+}
+
+function updateMessageDelivery(message, state) {
+  if (!isRenderedMessage(message)) return false;
+  message.deliveryState = state;
+  message.localOnly = message.deliveryContext === "group"
+    && (state === "sending" || state === "reconnecting");
+  message.article.dataset.deliveryState = state;
+  if (state === "sending" || state === "reconnecting") {
+    message.article.setAttribute("aria-busy", "true");
+  } else {
+    message.article.removeAttribute("aria-busy");
+  }
+  const key = deliveryStatusKey(state, message.deliveryContext);
+  if (message.delivery && key) {
+    message.delivery.dataset.i18n = key;
+    message.delivery.textContent = t(key);
+  }
+  if (state === "delivered" && message.deliveryContext === "group") {
+    message.renderOrdinal = ++renderedMessageOrdinal;
+    moveMessageToCommittedTail(message);
+  }
+  return true;
+}
+
+function updatePendingGroupMessages(state) {
+  const roomId = groupRoom?.roomId;
+  for (const draft of pendingGroupDrafts.values()) {
+    if (draft.roomId === roomId) updateMessageDelivery(draft.message, state);
+  }
+}
+
+function failPendingGroupMessage(clientEventId, reason) {
+  const draft = pendingGroupDrafts.get(clientEventId);
+  if (!draft || draft.roomId !== groupRoom?.roomId) return;
+  pendingGroupDrafts.delete(clientEventId);
+  updateMessageDelivery(draft.message, "failed");
+  setStatus(format("message_send_failed_status", { message: redact(reason) }), "error");
+}
+
+function sendText() {
   const text = $("send-text").value;
   if (!text.trim()) return;
   if (groupRoom?.active) {
@@ -2375,19 +2529,37 @@ async function sendText() {
       setStatus(t("message_too_large"), "error");
       return;
     }
-    $("send-text-btn").disabled = true;
-    setStatus(t("group_message_sending"), "loading");
+    const controller = groupRoom;
+    const member = groupMemberById(controller.memberId);
+    const roomId = controller.roomId;
     const clientEventId = randomBase64URL(16);
-    pendingGroupDrafts.set(clientEventId, { revision: groupDraftRevision, text });
-    try {
-      await groupRoom.sendText(text, clientEventId);
-    } catch (error) {
+    const message = addMessage({
+      type: "text",
+      text,
+      mine: true,
+      senderName: member?.displayName,
+      senderCode: member?.code,
+      senderRole: member?.role,
+      deliveryState: "sending",
+      deliveryContext: "group",
+      groupOrdered: true,
+    });
+    pendingGroupDrafts.set(clientEventId, { roomId, text, message });
+    clearSubmittedText();
+    showQueuedSendFeedback();
+    setStatus(t("group_message_sending"), "loading");
+    void controller.sendText(text, clientEventId).then((result) => {
+      const submitted = pendingGroupDrafts.get(clientEventId);
+      if (submitted?.roomId !== roomId) return;
+      if (result?.recovering) updateMessageDelivery(submitted.message, "reconnecting");
+    }, (error) => {
+      const submitted = pendingGroupDrafts.get(clientEventId);
+      if (submitted?.roomId !== roomId) return;
       pendingGroupDrafts.delete(clientEventId);
-      setStatus(format("status_failed", { message: redact(error.message) }), "error");
+      updateMessageDelivery(submitted.message, "failed");
+      setStatus(format("message_send_failed_status", { message: redact(error.message) }), "error");
       recordGroupError(error);
-    } finally {
-      $("send-text-btn").disabled = !groupRoom?.canSend;
-    }
+    });
     return;
   }
   if (!activeSession || !activePeerAddress) {
@@ -2399,31 +2571,67 @@ async function sendText() {
     setStatus(t("message_too_large"), "error");
     return;
   }
-  $("send-text-btn").disabled = true;
-  setStatus(t("message_sending"), "loading");
-  try {
-    const messageId = randomID();
-    const response = await sendChatEnvelopeTo(
-      activePeerAddress,
-      sessionMeta("TEXT", { messageId }),
-      payload,
-      APP_CONFIG.ports.text,
-    );
-    const ack = unpackChatEnvelope(response);
-    if (ack.payload.length
-      || ack.meta.type !== "TEXT_ACK"
-      || !hasSession(ack.meta)
-      || ack.meta.messageId !== messageId) throw new Error("text acknowledgement rejected");
-    addMessage({ type: "text", text, mine: true });
-    $("send-text").value = "";
-    setStatus(t("message_delivered"), "connected");
-    noteAuthenticatedPeerTraffic();
-  } catch (error) {
-    setStatus(format("status_failed", { message: redact(error.message) }), "error");
-    recordError(error);
-  } finally {
-    $("send-text-btn").disabled = !activeSession;
+  const session = activeSession;
+  const peerAddress = activePeerAddress;
+  const queue = privateTextQueueFor(session, peerAddress);
+  if (queue.frames + 1 > APP_CONFIG.group.sendQueueMaxFrames
+    || queue.bytes + payload.length > APP_CONFIG.group.sendQueueMaxBytes) {
+    setStatus(t("message_queue_full"), "error");
+    return;
   }
+  const messageId = randomID();
+  const message = addMessage({
+    type: "text",
+    text,
+    mine: true,
+    deliveryState: "sending",
+    deliveryContext: "private",
+  });
+  queue.frames += 1;
+  queue.bytes += payload.length;
+  queue.pending.add(message);
+  clearSubmittedText();
+  showQueuedSendFeedback();
+  setStatus(t("message_sending"), "loading");
+  const send = async () => {
+    try {
+      if (queue.closed || activeSession !== session || activePeerAddress !== peerAddress) {
+        throw new Error("the room changed before this message could be sent");
+      }
+      setStatus(t("message_sending"), "loading");
+      const response = await sendChatEnvelopeTo(
+        peerAddress,
+        { type: "TEXT", session, messageId },
+        payload,
+        APP_CONFIG.ports.text,
+      );
+      const ack = unpackChatEnvelope(response);
+      if (ack.payload.length
+        || ack.meta.type !== "TEXT_ACK"
+        || !sessionMatches(ack.meta, session)
+        || ack.meta.messageId !== messageId) throw new Error("text acknowledgement rejected");
+      updateMessageDelivery(message, "delivered");
+      if (activeSession === session && activePeerAddress === peerAddress) {
+        setStatus(t("message_delivered"), "connected");
+        noteAuthenticatedPeerTraffic();
+      }
+    } catch (error) {
+      const cancelledWithRoom = queue.closed
+        && (activeSession !== session || activePeerAddress !== peerAddress);
+      updateMessageDelivery(message, "failed");
+      if (activeSession === session && activePeerAddress === peerAddress) {
+        setStatus(format("message_send_failed_status", { message: redact(error.message) }), "error");
+      }
+      if (!cancelledWithRoom) recordError(error);
+    } finally {
+      queue.pending.delete(message);
+      queue.frames = Math.max(0, queue.frames - 1);
+      queue.bytes = Math.max(0, queue.bytes - payload.length);
+      if (queue.frames === 0 && privateTextQueues.get(session) === queue) privateTextQueues.delete(session);
+    }
+  };
+  const queued = queue.tail.then(send, send);
+  queue.tail = queued.catch(() => {});
 }
 
 async function receiveText(connection) {
@@ -2491,14 +2699,48 @@ function addMessage(item) {
       ? groupMemberIdentity({ displayName: item.senderName, code: item.senderCode, role: item.senderRole })
       : item.mine ? t("you") : t("peer");
     meta.textContent = `${who} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    if (item.mine && item.deliveryState) {
+      const delivery = document.createElement("span");
+      const key = deliveryStatusKey(item.deliveryState, item.deliveryContext);
+      delivery.className = "message-delivery-status";
+      delivery.dataset.i18n = key;
+      delivery.textContent = t(key);
+      meta.append(document.createTextNode(" · "), delivery);
+    }
     article.append(meta, bubble);
   }
-  $("history").append(article);
-  renderedMessages.push({ article, objectURL, retainedBytes });
+  const delivery = article.querySelector(".message-delivery-status");
+  const message = {
+    article,
+    bubble,
+    delivery,
+    deliveryContext: item.deliveryContext || "",
+    deliveryState: item.deliveryState || "",
+    groupOrdered: Boolean(item.groupOrdered),
+    renderOrdinal: ++renderedMessageOrdinal,
+    localOnly: Boolean(
+      item.deliveryContext === "group"
+      && item.mine
+      && (item.deliveryState === "sending" || item.deliveryState === "reconnecting"),
+    ),
+    objectURL,
+    retainedBytes,
+  };
+  if (item.deliveryState) {
+    article.dataset.deliveryState = item.deliveryState;
+    if (item.deliveryState === "sending" || item.deliveryState === "reconnecting") {
+      article.setAttribute("aria-busy", "true");
+    }
+  }
+  insertRenderedMessage(message);
   renderedMessageBytes += retainedBytes;
   while (renderedMessages.length > MESSAGE_HISTORY_MAX_ITEMS
     || renderedMessageBytes > MESSAGE_HISTORY_MAX_BYTES) {
-    const expired = renderedMessages.shift();
+    let oldestIndex = 0;
+    for (let index = 1; index < renderedMessages.length; index += 1) {
+      if (renderedMessages[index].renderOrdinal < renderedMessages[oldestIndex].renderOrdinal) oldestIndex = index;
+    }
+    const [expired] = renderedMessages.splice(oldestIndex, 1);
     if (!expired) break;
     renderedMessageBytes -= expired.retainedBytes;
     for (const media of expired.article.querySelectorAll("audio, video")) {
@@ -2510,6 +2752,7 @@ function addMessage(item) {
     expired.article.remove();
   }
   article.scrollIntoView({ block: "end" });
+  return message;
 }
 
 addEventListener("pagehide", (event) => {
@@ -2533,6 +2776,7 @@ function clearMessageHistory() {
   }
   renderedMessages.length = 0;
   renderedMessageBytes = 0;
+  renderedMessageOrdinal = 0;
 }
 
 // ---- TCF1 streaming file protocol --------------------------------------
@@ -5333,7 +5577,6 @@ $("qr-dialog").addEventListener("cancel", (event) => {
   clearInviteQR();
 });
 $("send-text-btn").addEventListener("click", sendText);
-$("send-text").addEventListener("input", () => { groupDraftRevision += 1; });
 $("send-text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();

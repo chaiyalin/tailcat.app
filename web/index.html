@@ -222,7 +222,7 @@
       <span class="secure-badge"><span class="ui-icon icon-shield" aria-hidden="true"></span><span data-i18n="secure">End-to-end encrypted</span></span>
       <p id="group-wake-lock-alert" class="field-help warning group-wake-lock-alert hidden" role="alert" data-i18n="group_wake_lock_failed">The screen could not be kept awake. To host on mobile, manually keep this page in the foreground and the screen on.</p>
 
-      <section id="history" class="history" tabindex="-1" aria-live="polite" aria-label="Messages">
+      <section id="history" class="history" tabindex="-1" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false" data-i18n-aria-label="messages_title" aria-label="Messages">
         <div id="welcome" class="welcome">
           <picture class="welcome-art-frame" aria-hidden="true">
             <source media="(max-width: 1366px) and (pointer: coarse)" srcset="assets/voxel-cat-mark.webp">
@@ -254,7 +254,7 @@
         <div class="compose-row">
           <button id="attach-btn" class="icon-button" type="button" disabled data-i18n-title="attach" aria-label="Attach files"><span class="ui-icon icon-attachment" aria-hidden="true"></span></button>
           <input id="send-file" type="file" multiple hidden>
-          <textarea id="send-text" class="field message-input" rows="1" maxlength="65536" disabled data-i18n-placeholder="message_placeholder" placeholder="Write an encrypted message…"></textarea>
+          <textarea id="send-text" class="field message-input" rows="1" maxlength="65536" disabled data-i18n-placeholder="message_placeholder" data-i18n-aria-label="message_input_label" aria-label="Message" placeholder="Write an encrypted message…"></textarea>
           <button id="ptt-btn" class="icon-button" type="button" disabled data-i18n-title="record_voice" aria-label="Hold to record voice note"><span class="ui-icon icon-microphone" aria-hidden="true"></span></button>
           <button id="send-text-btn" class="icon-button send" type="button" disabled data-i18n-title="send_message" aria-label="Send message"><span class="ui-icon icon-send" aria-hidden="true"></span></button>
         </div>

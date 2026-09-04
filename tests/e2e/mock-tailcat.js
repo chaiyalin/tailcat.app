@@ -27,6 +27,9 @@ export async function installMockTailcat(page, namespace) {
     let fileFinalWritesStarted = 0;
     let failControlDials = false;
     let failGroupDials = false;
+    let writeGateSequence = 0;
+    const writeGates = [];
+    const heldWrites = new Map();
 
     function stableHex(value) {
       // This is only an address identity function for the transport fixture,
@@ -51,6 +54,64 @@ export async function installMockTailcat(page, namespace) {
       };
       const [code, name] = regions[id] || ["tok", "Tokyo"];
       return { id: id > 0 ? id : 304, code, name };
+    }
+
+    function decodeWriteJSON(bytes, offset) {
+      if (bytes.length < offset + 4) return null;
+      const length = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, false);
+      const start = offset + 4;
+      if (!length || start + length > bytes.length) return null;
+      try {
+        return JSON.parse(new TextDecoder().decode(bytes.subarray(start, start + length)));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function describeWrite(record, bytes) {
+      const isChatEnvelope = bytes.length >= 8
+        && bytes[0] === 0x54
+        && bytes[1] === 0x43
+        && bytes[2] === 0x48
+        && bytes[3] === 0x31;
+      const chat = isChatEnvelope ? decodeWriteJSON(bytes, 4) : null;
+      const group = !isChatEnvelope && bytes.length > 4 ? decodeWriteJSON(bytes, 0) : null;
+      return {
+        port: record.port,
+        direction: record.direction,
+        frameType: chat?.type || group?.type || "",
+        eventType: group?.event?.type || "",
+      };
+    }
+
+    function writeMatchesGate(gate, descriptor) {
+      return (gate.port === undefined || gate.port === descriptor.port)
+        && (!gate.direction || gate.direction === descriptor.direction)
+        && (!gate.frameType || gate.frameType === descriptor.frameType)
+        && (!gate.eventType || gate.eventType === descriptor.eventType);
+    }
+
+    function waitForWriteGate(record, bytes) {
+      const descriptor = describeWrite(record, bytes);
+      const index = writeGates.findIndex((gate) => writeMatchesGate(gate, descriptor));
+      if (index < 0) return Promise.resolve();
+      const gate = writeGates[index];
+      gate.remaining -= 1;
+      if (gate.remaining <= 0) writeGates.splice(index, 1);
+      const id = ++writeGateSequence;
+      return new Promise((resolve, reject) => {
+        heldWrites.set(id, {
+          descriptor,
+          resolve: () => {
+            heldWrites.delete(id);
+            resolve();
+          },
+          reject: (error) => {
+            heldWrites.delete(id);
+            reject(error);
+          },
+        });
+      });
     }
 
     function parseEnvelope(record) {
@@ -165,6 +226,7 @@ export async function installMockTailcat(page, namespace) {
             failNextFileFinalMessage = "";
             throw new Error(message);
           }
+          await waitForWriteGate(record, bytes);
           // Fragment each application write at awkward boundaries so framing
           // is exercised independently of the transport's packet boundaries.
           const cuts = bytes.length > 9 ? [1, 3, 9, bytes.length] : [1, bytes.length];
@@ -383,6 +445,27 @@ export async function installMockTailcat(page, namespace) {
       setFailGroupDials(value = true) {
         failGroupDials = Boolean(value);
       },
+      holdNextWrite({ port, direction = "", frameType = "", eventType = "", count = 1 } = {}) {
+        const numericPort = port === undefined ? undefined : Number(port);
+        const remaining = Math.max(1, Math.floor(Number(count) || 1));
+        writeGates.push({
+          port: Number.isFinite(numericPort) ? numericPort : undefined,
+          direction: String(direction || ""),
+          frameType: String(frameType || ""),
+          eventType: String(eventType || ""),
+          remaining,
+        });
+      },
+      releaseHeldWrites() {
+        const entries = [...heldWrites.values()];
+        for (const entry of entries) entry.resolve();
+        return entries.length;
+      },
+      rejectHeldWrites(message = "mock write rejected") {
+        const entries = [...heldWrites.values()];
+        for (const entry of entries) entry.reject(new Error(String(message)));
+        return entries.length;
+      },
       closeConnections({ port, direction } = {}) {
         for (const state of connections.values()) {
           if (state.closed) continue;
@@ -413,6 +496,8 @@ export async function installMockTailcat(page, namespace) {
           endpoint,
           listenerAddress: listener?.addr || null,
           fileFinalWritesStarted,
+          armedWriteGates: writeGates.length,
+          heldWrites: [...heldWrites.values()].map(({ descriptor }) => ({ ...descriptor })),
           records: records.map((record) => ({
             id: record.id,
             port: record.port,

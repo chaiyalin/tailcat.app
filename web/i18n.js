@@ -62,6 +62,7 @@ export const translations = Object.freeze({
     welcome_title: "Share only while both people are online",
     welcome_body: "Create or join a room. Messages and files are not uploaded or kept by this site; an address key is saved locally only if you opt in.",
     attach: "Attach files",
+    message_input_label: "Message",
     message_placeholder: "Write an encrypted message…",
     record_voice: "Hold to record voice note",
     send_message: "Send message",
@@ -211,7 +212,12 @@ export const translations = Object.freeze({
     persistent_unavailable: "This browser cannot save an address; this room will remain temporary.",
     message_too_large: "Text is limited to 64 KiB",
     message_sending: "Sending message…",
+    message_pending: "Sending…",
+    message_retrying: "Reconnecting · delivery not yet confirmed",
     message_delivered: "Message delivered",
+    message_send_failed: "Send failed · delivery not confirmed",
+    message_send_failed_status: "Message send failed: {message}",
+    message_queue_full: "Too many messages are waiting to send. Please wait and try again.",
     message_received: "Message received",
     need_peer: "Connect to a peer first",
     invalid_address: "Enter a valid tc… address",
@@ -344,6 +350,7 @@ export const translations = Object.freeze({
     welcome_title: "仅在双方同时在线时分享",
     welcome_body: "创建或加入房间后即可分享。本站不会上传或留存消息和文件；仅在你主动启用时于本地保存地址密钥。",
     attach: "添加文件",
+    message_input_label: "消息输入框",
     message_placeholder: "输入加密消息…",
     record_voice: "按住录制语音留言",
     send_message: "发送消息",
@@ -493,7 +500,12 @@ export const translations = Object.freeze({
     persistent_unavailable: "此浏览器无法保存地址；本次房间将保持为临时地址。",
     message_too_large: "文字最多 64 KiB",
     message_sending: "正在发送消息…",
+    message_pending: "正在发送…",
+    message_retrying: "正在重新连接 · 尚未确认送达",
     message_delivered: "消息已送达",
+    message_send_failed: "发送失败 · 送达状态未确认",
+    message_send_failed_status: "消息发送失败：{message}",
+    message_queue_full: "等待发送的消息过多，请稍候再试。",
     message_received: "收到消息",
     need_peer: "请先连接一位用户",
     invalid_address: "请输入有效的 tc… 地址",
@@ -597,6 +609,9 @@ export function createI18n(initial = detectLanguage()) {
       const value = translate(element.dataset.i18nTitle);
       element.title = value;
       if (element.hasAttribute("aria-label")) element.setAttribute("aria-label", value);
+    }
+    for (const element of root.querySelectorAll("[data-i18n-aria-label]")) {
+      element.setAttribute("aria-label", translate(element.dataset.i18nAriaLabel));
     }
   };
   return {

@@ -39,6 +39,9 @@ async function sendText(page, text) {
   await page.locator("#send-text").fill(text);
   await page.locator("#send-text-btn").click();
   await expect(page.locator("#send-text")).toHaveValue("");
+  const message = page.locator("#history .message.mine", { hasText: text }).last();
+  await expect(message).toHaveAttribute("data-delivery-state", "delivered");
+  return message;
 }
 
 test("Group Beta stays hidden behind its independent production switch", async ({ page }) => {
@@ -131,6 +134,104 @@ test("owner approval performs callback verification and commits ordered text", a
   }
 
   await context.close();
+});
+
+test("optimistic group text reconciles into the host's canonical order without duplicates", async ({ browser }) => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const namespace = `group-optimistic-order-${Date.now()}`;
+  const { page: host, invitation } = await createGroupHost(context, namespace, "Owner");
+  const alice = await joinGroup(context, namespace, host, invitation, "Alice");
+  const bob = await joinGroup(context, namespace, host, invitation, "Bob");
+
+  await alice.evaluate(() => globalThis.__mockTailcat.holdNextWrite({
+    port: 104,
+    direction: "outbound",
+    frameType: "TEXT_SUBMIT",
+  }));
+  const aliceFirst = "Alice optimistic first";
+  const aliceSecond = "Alice optimistic second";
+  const bobCommitted = "Bob reaches the host first";
+
+  await alice.locator("#send-text").fill(aliceFirst);
+  await alice.locator("#send-text-btn").click();
+  await alice.locator("#send-text").fill(aliceSecond);
+  await alice.locator("#send-text-btn").click();
+
+  const firstOptimistic = alice.locator("#history .message.mine", { hasText: aliceFirst });
+  const secondOptimistic = alice.locator("#history .message.mine", { hasText: aliceSecond });
+  await expect(firstOptimistic).toHaveCount(1);
+  await expect(secondOptimistic).toHaveCount(1);
+  await expect(firstOptimistic).toHaveAttribute("data-delivery-state", "sending");
+  await expect(secondOptimistic).toHaveAttribute("data-delivery-state", "sending");
+  await expect(alice.locator("#history .message:not(.system) .bubble")).toHaveText([
+    aliceFirst,
+    aliceSecond,
+  ]);
+  await expect.poll(() => alice.evaluate(() => globalThis.__mockTailcat.snapshot().heldWrites)).toEqual([{
+    port: 104,
+    direction: "outbound",
+    frameType: "TEXT_SUBMIT",
+    eventType: "",
+  }]);
+  await expect(host.locator("#history .message:not(.system)")).toHaveCount(0);
+
+  await sendText(bob, bobCommitted);
+  await expect(host.locator("#history .message:not(.system) .bubble")).toHaveText([bobCommitted]);
+  await expect(alice.locator("#history .message:not(.system) .bubble")).toHaveText([
+    bobCommitted,
+    aliceFirst,
+    aliceSecond,
+  ]);
+
+  expect(await alice.evaluate(() => globalThis.__mockTailcat.releaseHeldWrites())).toBe(1);
+  await expect(firstOptimistic).toHaveAttribute("data-delivery-state", "delivered");
+  await expect(secondOptimistic).toHaveAttribute("data-delivery-state", "delivered");
+  const canonicalOrder = [bobCommitted, aliceFirst, aliceSecond];
+  for (const page of [host, alice, bob]) {
+    await expect(page.locator("#history .message:not(.system) .bubble")).toHaveText(canonicalOrder);
+  }
+  await expect(alice.locator("#history .message.mine", { hasText: aliceFirst })).toHaveCount(1);
+  await expect(alice.locator("#history .message.mine", { hasText: aliceSecond })).toHaveCount(1);
+  await context.close();
+});
+
+test("history eviction preserves a new committed group message amid one hundred local optimistic messages", async ({ browser }) => {
+  const context = await browser.newContext({ locale: "en-US" });
+  try {
+    const namespace = `group-history-committed-${Date.now()}`;
+    const { page: host, invitation } = await createGroupHost(context, namespace, "Owner");
+    const blocked = await joinGroup(context, namespace, host, invitation, "Blocked sender");
+    const authority = await joinGroup(context, namespace, host, invitation, "Authority");
+
+    await blocked.evaluate(() => globalThis.__mockTailcat.holdNextWrite({
+      port: 104,
+      direction: "outbound",
+      frameType: "TEXT_SUBMIT",
+    }));
+    await blocked.evaluate(() => {
+      const input = document.getElementById("send-text");
+      const button = document.getElementById("send-text-btn");
+      for (let index = 0; index < 100; index += 1) {
+        input.value = `blocked optimistic ${index}`;
+        button.click();
+      }
+    });
+
+    await expect.poll(() => blocked.evaluate(() => globalThis.__mockTailcat.snapshot().heldWrites.length)).toBe(1);
+    await expect(blocked.locator("#history .message.mine")).toHaveCount(100);
+    await expect(blocked.locator('#history .message.mine[data-delivery-state="sending"]')).toHaveCount(64);
+    await expect(blocked.locator('#history .message.mine[data-delivery-state="failed"]')).toHaveCount(36);
+    await expect(host.locator("#history .message:not(.system)")).toHaveCount(0);
+
+    const committedText = "newest authoritative group message";
+    await sendText(authority, committedText);
+    const committedOnBlocked = blocked.locator("#history .message:not(.mine):not(.system)", { hasText: committedText });
+    await expect(committedOnBlocked).toHaveCount(1);
+    await expect(committedOnBlocked.locator(".bubble")).toHaveText(committedText);
+    await expect(blocked.locator("#history .message:not(.system)")).toHaveCount(100);
+  } finally {
+    await context.close();
+  }
 });
 
 test("rejection, invitation rotation, removal, and host close are isolated", async ({ browser }) => {
@@ -507,10 +608,16 @@ test("ten seats join and the eleventh applicant receives FULL", async ({ browser
     const input = document.getElementById("send-text");
     const button = document.getElementById("send-text-btn");
     for (let index = 0; index < 100; index += 1) {
-      while (button.disabled) await new Promise((resolve) => setTimeout(resolve, 0));
-      input.value = `${sender}:${index}`;
+      const text = `${sender}:${index}`;
+      input.value = text;
       button.click();
-      while (input.value || button.disabled) await new Promise((resolve) => setTimeout(resolve, 0));
+      const message = [...document.querySelectorAll("#history .message.mine")]
+        .findLast((item) => item.querySelector(".bubble")?.textContent === text);
+      if (!message) throw new Error(`optimistic message was not rendered for ${text}`);
+      while (!["delivered", "failed"].includes(message.dataset.deliveryState)) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      if (message.dataset.deliveryState === "failed") throw new Error(`group message failed for ${text}`);
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
   }, { sender: senderIndex })));
