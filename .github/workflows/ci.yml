@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/mobile-support, feature/group-rooms-v2]
+    branches: [main, feature/mobile-support, feature/group-rooms-v2, feature/native-webrtc-files]
   pull_request:
   workflow_dispatch:
 
@@ -106,6 +106,9 @@ jobs:
 
       - name: Install test dependencies
         run: npm ci
+
+      - name: Test native file transport primitives
+        run: npm run test:unit
 
       - name: Install supported browser channels
         run: npx playwright install --with-deps chrome msedge webkit
