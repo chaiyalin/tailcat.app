@@ -73,6 +73,12 @@ test("private TCF1 native files retain acceptance, hashes and a reusable PC", as
   for (const size of [0, 1, 16 * 1024, 64 * 1024, 64 * 1024 + 1]) await send(sender, receiver, size, `native-${size}.bin`);
   expect((await sender.evaluate(() => __nativeTest)).bytes).toBeGreaterThan(0);
   expect((await sender.evaluate(() => __nativeTest)).pcs).toBe(1);
+  const pipes = await sender.evaluate(() => __mockTailcat.snapshot().records.filter((record) =>
+    record.direction === "outbound" && record.envelope?.type === "NATIVE_FILE_SIGNAL_PIPE"));
+  expect(pipes).toHaveLength(1);
+  await sender.locator("#stop-listen-btn").click();
+  await expect.poll(() => sender.evaluate(() => __mockTailcat.snapshot().records.filter((record) =>
+    record.envelope?.type === "NATIVE_FILE_SIGNAL_PIPE").every((record) => record.closed))).toBe(true);
 });
 
 test("forceDerp preserves negotiated streaming without creating a PC", async ({ context }) => {
@@ -80,6 +86,13 @@ test("forceDerp preserves negotiated streaming without creating a PC", async ({ 
   await sender.locator("#force-derp").check();
   await send(sender, receiver, 2 * 1024 * 1024);
   expect((await sender.evaluate(() => __nativeTest)).pcs).toBe(0);
+});
+
+test("unavailable native signaling still permits an authorized DERP file", async ({ context }) => {
+  const { sender, receiver } = await pair(context);
+  await sender.evaluate(() => __mockTailcat.setFailControlDials(true));
+  await send(sender, receiver, 64 * 1024);
+  await expect(sender.locator(".transfer-item", { hasText: "native.bin" })).toHaveAttribute("data-route", "derp");
 });
 
 test("direct failure restarts OPFS once without a second receive item", async ({ context }) => {

@@ -17,7 +17,7 @@ import (
 )
 
 func TestReleaseVersionSourcesAgree(t *testing.T) {
-	const expected = "0.3.0-beta.1"
+	const expected = "0.4.0-beta.1"
 	type manifest struct {
 		Version  string              `json:"version"`
 		Packages map[string]manifest `json:"packages"`

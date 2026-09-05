@@ -66,6 +66,7 @@ function closeNativeFilePeers(groupOnly = false) {
   for (const [key, peer] of nativeFilePeers) {
     if (groupOnly && !peer.group) continue;
     peer.manager.close();
+    peer.controlClient?.close();
     for (const mux of peer.muxes) mux.close();
     nativeFilePeers.delete(key);
   }
@@ -85,10 +86,10 @@ function nativeFilePeer(context, incoming) {
     ? groupRoom === controller && controller.active && controller.lifecycleEpoch === epoch && controller.roomId === room
       && !controller.snapshot().roomPaused && controller.snapshot().members.some((member) => member.id === peerId && member.status === "online")
     : activeSession === room && activePeerAddress === peerId && listener?.addr === localId;
-  peer = { group, room, peerId, authorized, muxes: new Set(), manager: null };
+  peer = { group, room, peerId, authorized, muxes: new Set(), manager: null, controlClient: null, controlStarting: null };
   peer.manager = new FileTransportManager({ room, localId, peerId, isAuthorized: authorized,
     sendSignal: (signal) => {
-      if (!group) return sendControlTo(peerId, { v: APP_CONFIG.protocolVersion, session: room, type: "NATIVE_FILE_SIGNAL", signal });
+      if (!group) return sendNativeFileSignal(peer, signal);
       const mux = [...peer.muxes].find((item) => !item.closed);
       if (!mux) throw new Error("native file coordinator closed");
       return mux.notify("SIGNAL", signal);
@@ -96,6 +97,63 @@ function nativeFilePeer(context, incoming) {
   });
   nativeFilePeers.set(key, peer);
   return peer;
+}
+
+async function nativeFileControlClient(peer) {
+  if (!peer.authorized()) throw new Error("AUTHORIZATION_EXPIRED");
+  // A cold Tailcat Client per ICE candidate spends the direct-setup deadline
+  // repeatedly establishing relay identity. Reuse a room-bound Client for
+  // native signaling, while preserving the authenticated port-100 envelope.
+  if (!peer.controlStarting) {
+    peer.controlStarting = tailcatConnect({ addr: peer.peerId, derpMapURL: APP_CONFIG.derpMapURL }).then((client) => {
+      if (!peer.authorized()) { client.close(); throw new Error("AUTHORIZATION_EXPIRED"); }
+      peer.controlClient = client; return client;
+    });
+    peer.controlStarting.catch(() => { peer.controlStarting = null; });
+  }
+  return peer.controlStarting;
+}
+
+function attachNativeSignalPipe(peer, connection) {
+  if (peer.signalPipes?.size >= 2) throw new Error("native signal pipe limit");
+  peer.signalPipes ||= new Set();
+  const mux = new FileCoordination(connection, { authorized: peer.authorized,
+    signal: (signal) => peer.manager.handleSignal(signal) });
+  mux.handlers.set("READY", () => true);
+  peer.signalPipes.add(mux);
+  peer.muxes.add(mux);
+  if (!peer.signalPipe || peer.signalPipe.closed) peer.signalPipe = mux;
+  void mux.ended.promise.then(() => {
+    peer.signalPipes.delete(mux); peer.muxes.delete(mux);
+    if (peer.signalPipe === mux) peer.signalPipe = null;
+  });
+  return mux;
+}
+
+async function nativeFileSignalPipe(peer) {
+  if (peer.signalPipe && !peer.signalPipe.closed) return peer.signalPipe;
+  if (!peer.signalOpening) {
+    peer.signalOpening = (async () => {
+      const client = await nativeFileControlClient(peer);
+      if (peer.signalPipe && !peer.signalPipe.closed) return peer.signalPipe;
+      const connection = await client.dial({ port: APP_CONFIG.ports.control });
+      let mux;
+      try {
+        if (!peer.authorized()) throw new Error("AUTHORIZATION_EXPIRED");
+        await writeChunked(connection, packChatEnvelope({ v: APP_CONFIG.protocolVersion,
+          session: peer.room, type: "NATIVE_FILE_SIGNAL_PIPE" }, new Uint8Array()));
+        mux = attachNativeSignalPipe(peer, connection);
+        await mux.rpc("READY", null);
+        return mux;
+      } catch (error) { mux?.close(); connection.close(); throw error; }
+    })().finally(() => { peer.signalOpening = null; });
+  }
+  return peer.signalOpening;
+}
+
+async function sendNativeFileSignal(peer, signal) {
+  const mux = await nativeFileSignalPipe(peer);
+  return mux.notify("SIGNAL", signal);
 }
 
 function nativeFilePath(ui, path, recipientId = "") {
@@ -2348,8 +2406,23 @@ async function receiveGroupConnection(connection) {
 
 async function receiveControl(connection) {
   try {
-    const bytes = await readAllBounded(connection, APP_CONFIG.limits.controlBytes + 8);
-    const { meta, payload } = unpackChatEnvelope(bytes);
+    // Parse the bounded TCH1 header before EOF so the optional authenticated
+    // native-file signaling stream can remain open across SDP and ICE frames.
+    const reader = new ConnectionReader(connection);
+    const header = await reader.readExact(8);
+    const length = new DataView(header.buffer).getUint32(4);
+    if (new TextDecoder().decode(header.subarray(0, 4)) !== "TCH1"
+      || length > APP_CONFIG.limits.controlBytes) throw new Error("invalid control header");
+    const json = await reader.readExact(length);
+    const meta = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(json));
+    if (meta.type === "NATIVE_FILE_SIGNAL_PIPE") {
+      if (!hasSession(meta) || !nativeFileSupported({ mode: "private" })) throw new Error("native signal session rejected");
+      const peer = nativeFilePeer({ mode: "private", session: activeSession }, true);
+      const mux = attachNativeSignalPipe(peer, connection);
+      await mux.ended.promise;
+      return;
+    }
+    const payload = await readAllBounded(connection, 1);
     if (payload.length) throw new Error("control message cannot have a payload");
     if (meta.type === "HELLO") {
       await wakeLocks.acquire("handshake");
@@ -3689,7 +3762,13 @@ async function sendFileTransfer(entry) {
   tcTest.sentSha256 = null;
   await wakeLocks.acquire("file-transfer");
   try {
-    connection = await tailcatDial({
+    if (nativeFileSupported({ mode: "private" })) {
+      const peer = nativeFilePeer({ mode: "private", session }, false);
+      const client = await nativeFileControlClient(peer);
+      try { await nativeFileSignalPipe(peer); }
+      catch (_) { peer.manager.fail(); }
+      connection = await client.dial({ port: APP_CONFIG.ports.file });
+    } else connection = await tailcatDial({
       addr: address,
       derpMapURL: APP_CONFIG.derpMapURL,
       port: APP_CONFIG.ports.file,
@@ -4130,6 +4209,12 @@ async function receiveFile(connection) {
     let reception = null;
     if (native) {
       const peer = nativeFilePeer(context, true);
+      // Prepare the return Tailcat signaling path before ACCEPT starts the
+      // sender's 10-second WebRTC clock. ICE itself is never given extra time.
+      if (context.mode === "private") {
+        try { await nativeFileSignalPipe(peer); }
+        catch (_) { peer.manager.fail(); }
+      }
       const current = () => peer.authorized() && incomingFileTransfer === transferState && !transferState.cancelled;
       const mux = makeFileCoordination(connection, peer, current, async () => {
         const frame = await readFileFramePayload(reader, await decision.prefetchedHeader);

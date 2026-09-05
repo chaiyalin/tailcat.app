@@ -3,6 +3,7 @@ dist/
 node_modules/
 test-results/
 test-results-live/
+test-results-native/
 playwright-report/
 .playwright-cli/
 .wrangler/

@@ -36,6 +36,10 @@ gate is open. No production or Magicsock deployment is changed here.
   obtain existing owner grants, then exchange signaling directly on the
   authorized sender/receiver Tailcat file coordination stream. The owner does
   not forward pairwise SDP or file bodies.
+- Negotiated private files reuse one room-bound Tailcat Client and a bounded,
+  authenticated bidirectional port-100 signaling pipe. SDP/ICE no longer wait
+  for a new TCP stream/EOF for each message. The pipe is prepared before
+  acceptance and closed on room exit; the WebRTC deadline stays 10 seconds.
 - Per-room/per-peer FileTransportManager: deterministic offerer, authenticated
   pair and generation binding, lazy PC creation/reuse, one incoming transfer,
   two outgoing recipient lanes, 10-second setup, 60-second failure cooldown,
@@ -72,6 +76,12 @@ gate is open. No production or Magicsock deployment is changed here.
 ## Local verification
 
 - Unit suite: **31 passed**.
+- Real Tokyo DERP smoke: room handshake, text, 1-byte file, **1 MiB native
+  DataChannel file and 1 MiB forced-DERP file passed**, with SHA-256 checked.
+  The earlier per-message signaling implementation missed the direct deadline;
+  the authenticated persistent pipe resolved that smoke-test failure. This is
+  one same-machine browser-pair run, not the 19/20 cross-network acceptance gate.
+  Live traces/screenshots are disabled; diagnostics contain only counts/states.
 - Full Chrome + Android touch emulation + WebKit mobile suite: **170 passed,
   4 conditional skips, zero failures**. Skips are the opt-in live test and
   three Safari-specific cases excluded on Android.
@@ -89,6 +99,8 @@ gate is open. No production or Magicsock deployment is changed here.
 - Earlier standalone WebKit ICE intermittently timed out at 10 seconds;
   the latest complete run passed. Hardware/network reliability is still open.
 - Edge is absent from this Mac. CI targets Edge; configuration alone is not a pass.
+- Initial remote CI caught a stale Go release-version assertion; its expected
+  version and README contract were updated, and local Go/WASM tests passed.
 - `go mod verify`: all modules verified. Tailcat v0.4.0 and existing Tailscale
   `72780705eda8` dependency unchanged. No draft fork or Magicsock integration.
 
