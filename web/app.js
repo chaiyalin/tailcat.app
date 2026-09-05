@@ -2409,11 +2409,12 @@ async function receiveControl(connection) {
     // Parse the bounded TCH1 header before EOF so the optional authenticated
     // native-file signaling stream can remain open across SDP and ICE frames.
     const reader = new ConnectionReader(connection);
-    const header = await reader.readExact(8);
+    const deadlineAt = Date.now() + STREAM_READ_TIMEOUT_MS;
+    const header = await withConnectionUntil(connection, reader.readExact(8), deadlineAt, "control header deadline exceeded");
     const length = new DataView(header.buffer).getUint32(4);
     if (new TextDecoder().decode(header.subarray(0, 4)) !== "TCH1"
       || length > APP_CONFIG.limits.controlBytes) throw new Error("invalid control header");
-    const json = await reader.readExact(length);
+    const json = await withConnectionUntil(connection, reader.readExact(length), deadlineAt, "control metadata deadline exceeded");
     const meta = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(json));
     if (meta.type === "NATIVE_FILE_SIGNAL_PIPE") {
       if (!hasSession(meta) || !nativeFileSupported({ mode: "private" })) throw new Error("native signal session rejected");
@@ -2422,7 +2423,7 @@ async function receiveControl(connection) {
       await mux.ended.promise;
       return;
     }
-    const payload = await readAllBounded(connection, 1);
+    const payload = await withConnectionUntil(connection, readAllBounded(connection, 1), deadlineAt, "control message deadline exceeded");
     if (payload.length) throw new Error("control message cannot have a payload");
     if (meta.type === "HELLO") {
       await wakeLocks.acquire("handshake");
