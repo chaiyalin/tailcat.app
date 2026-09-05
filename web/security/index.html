@@ -26,10 +26,10 @@
     <h1>安全说明 / Security notes</h1>
     <p class="lede">加密保护网络链路中的内容；它不验证参与者身份，也不能保护已被控制的终端或危险文件。多人群聊还必须信任房主。请在使用前了解边界。</p>
     <p class="lede" lang="en">Encryption protects content on each network link. It does not authenticate participants or protect a compromised endpoint or dangerous file, and group text additionally requires trusting the host. Understand the boundary before use.</p>
-    <p class="updated">更新日期 / Updated: 2026-09-04</p>
+    <p class="updated">更新日期 / Updated: 2026-09-05</p>
 
     <div class="facts" aria-label="Security facts">
-      <div class="fact"><strong>WireGuard 链路加密</strong><span>一对一内容与每条多人网络链路。</span></div>
+      <div class="fact"><strong>WireGuard / DTLS</strong><span>控制与中继使用 WireGuard；原生文件直传使用 DTLS。</span></div>
       <div class="fact"><strong>WebRTC DTLS-SRTP</strong><span>实时语音、视频与屏幕媒体。</span></div>
       <div class="fact"><strong>DERP 元数据 / Metadata</strong><span>中继可见 IP、时间、区域和流量模式。</span></div>
       <div class="fact"><strong>不扫描 / No scanning</strong><span>内容不经过病毒或恶意软件检查。</span></div>
@@ -45,8 +45,8 @@
 
         <h2>1. 保护范围</h2>
         <ul>
-          <li>一对一房间的文字、文件、语音留言以及通话信令在双方 Tailcat 端点之间使用 WireGuard 端到端加密；</li>
-          <li>多人房间中，每位成员与房主之间的控制及文字链路使用 WireGuard 加密；文件和语音留言通过加密 Tailcat 链路直接发送给所选接收者，不经过房主浏览器；</li>
+          <li>文字、语音留言、通话信令及中继文件使用 Tailcat WireGuard；启用原生文件直传时，可靠 DataChannel 文件正文使用 WebRTC DTLS；</li>
+          <li>群聊成员与房主之间的控制及文字链路使用 WireGuard；点对点文件正文不经过房主。文件直传同样可能暴露双方公网 IP，不申请媒体权限；</li>
           <li>仅一对一房间提供实时语音、视频和屏幕媒体，并由浏览器 WebRTC 使用 DTLS-SRTP 加密；</li>
           <li>网站为静态应用，无账号、消息数据库、文件托管、聊天历史、离线队列或内容恢复；</li>
           <li>私人一对一房间中，不超过 100 MiB 的文件仅在安全 OPFS 临时存储和可信容量估算可用时自动接收；每个已认证会话最多自动接收 20 个文件、累计 500 MiB，零字节也计一件，达到任一上限后改为手动确认，新会话重置。超过 100 MiB 或无法安全暂存时仍须接收者确认并选择位置。多人文件始终逐接收者确认。文件不会被自动打开、预览或扫描；完整传输须校验声明大小和 SHA-256，再由用户点击打开、保存或分享。</li>
@@ -94,8 +94,8 @@
 
         <h2>1. What is protected</h2>
         <ul>
-          <li>Private-room text, files, voice notes, and call signaling use WireGuard end-to-end encryption between the two Tailcat endpoints;</li>
-          <li>In a group room, each member-to-host control and text link uses WireGuard encryption; files and voice notes travel over encrypted Tailcat links directly to selected recipients without passing through the host browser;</li>
+          <li>Text, voice notes, call signaling and relayed files use Tailcat WireGuard. Enabled native file bodies use reliable WebRTC DataChannels with DTLS;</li>
+          <li>Group member-to-host control and text links use WireGuard; peer-to-peer file bodies bypass the host. Direct files can also expose public IPs, without requesting media permissions;</li>
           <li>Live audio, video, and display media is available only in private rooms and is encrypted by browser WebRTC with DTLS-SRTP;</li>
           <li>The site is static and has no account, message database, file hosting, chat history, offline queue, or content recovery; and</li>
           <li>In a private one-to-one room, a file up to and including 100 MiB is automatically received only when safe OPFS staging and a trustworthy capacity estimate are available. Each authenticated session can auto-receive at most 20 files and 500 MiB in total; zero-byte files count, reaching either limit makes later files manual, and a new session resets the counters. A larger file or one that cannot be staged safely still requires recipient approval and a selected destination. Every group file requires per-recipient approval. Files are never automatically opened, previewed, or scanned; a complete transfer verifies declared size and SHA-256 before the user clicks to open, save, or share.</li>

@@ -555,6 +555,15 @@ export async function installMockSavePicker(page) {
               async close() {
                 state.closed = true;
               },
+              async truncate(size) {
+                if (size !== 0 || state.closed || state.aborted) throw new Error("invalid reset");
+                state.totalBytes = 0;
+                state.writes = [];
+                state.resets = (state.resets || 0) + 1;
+              },
+              async seek(offset) {
+                if (offset !== 0) throw new Error("invalid reset offset");
+              },
               async abort() {
                 state.aborted = true;
               },

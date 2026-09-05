@@ -74,6 +74,9 @@ function publicCapabilities(capabilities) {
       protocol: capabilities?.file?.protocol === "TCF1" ? "TCF1" : "",
       receive: capabilities?.file?.receive === true,
       maxBytes: fileMaxBytes,
+      transports: Object.freeze(Array.isArray(capabilities?.file?.transports)
+        ? ["tailcat", "webrtc-dc-v1"].filter((value) => capabilities.file.transports.includes(value))
+        : ["tailcat"]),
     }),
     voice: Object.freeze({
       enabled: capabilities?.voice?.enabled === true,

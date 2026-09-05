@@ -135,6 +135,10 @@ progress { width: 100%; height: 4px; overflow: hidden; border: 0; border-radius:
 .transfer-list { margin: 0; padding: 7px 12px; list-style: none; }
 .transfer-item { display: flex; align-items: center; gap: 12px; padding: 9px; border-bottom: 1px solid #142a1c; }
 .transfer-item:last-child { border-bottom: 0; }
+.native-file-transfer { flex-wrap: wrap; }
+.native-file-path { flex-basis: 100%; color: var(--accent); font-size: 11px; overflow-wrap: anywhere; }
+.native-file-option { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 12px; cursor: pointer; }
+.native-file-option input { min-width: 20px; min-height: 20px; }
 .transfer-copy { min-width: 0; flex: 1; }
 .transfer-copy strong, .transfer-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer-copy strong { font-size: 11px; }

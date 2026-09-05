@@ -2,6 +2,7 @@ dist/
 .DS_Store
 node_modules/
 test-results/
+test-results-live/
 playwright-report/
 .playwright-cli/
 .wrangler/

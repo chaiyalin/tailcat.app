@@ -4,7 +4,7 @@ An unofficial, accountless encrypted browser room built from [Tailcatchat](https
 
 > **Public beta:** public Tailcat DERP relays are rate-limited, best-effort infrastructure with no uptime SLA or throughput target. Do not use this service as the only copy of important data.
 
-> **Release target `0.3.0-beta.1` — limited production beta:** Group Beta is implemented behind the independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` static release switches. Desktop hosting is enabled for the operator-authorized limited rollout; mobile hosting remains off until its real-device gates pass. Disabling either group switch does not affect private one-to-one rooms.
+> **Candidate `0.4.0-beta.1` — native file preview, not production acceptance:** private and group files negotiate reliable native DataChannels with one coordinated DERP restart. `TAILCAT_NATIVE_FILES_ENABLED` defaults to `0`. Production remains the separately archived `0.3.0-beta.1` baseline; mobile group hosting stays off. See [native file implementation and release evidence](NATIVE_FILE_UPGRADE.md) for exact status, limitations and outstanding gates. This native preview is public and does not use Cloudflare Access.
 
 tailcat.app supports temporary text, file, and voice-note transfers while participants are online. Private rooms also support WebRTC voice/video calls and screen sharing; Group Beta does not. There is no account, application database, server-side file store, offline delivery, cloud chat history, recovery service, content moderation, or malware scanning. An eligible private-room file of up to and including 100 MiB may be staged automatically in this origin's private browser storage, then exposed after verification for a user-initiated open, save, share, or delete action.
 
@@ -18,7 +18,7 @@ This project is not affiliated with or endorsed by Tailscale Inc. It does not us
 - Rooms are ephemeral by default. A Group Beta host must remain online: closing or refreshing the host page ends the room for everyone, with no host transfer. New members receive no earlier messages. An existing member can recover limited in-memory events during a 120-second reconnect window, but there is no cloud history or offline delivery.
 - A user may explicitly remember an address. Its private key is stored only in this origin's IndexedDB and can be removed with **Forget address** or by clearing site data.
 - Production private invitations use `https://tailcat.app/#v=1&invite=<tc…>`. Production group invitations use `https://tailcat.app/#v=1&mode=group&gv=1&invite=<tc…>&room=<128-bit-id>&join=<256-bit-token>`. Protected preview builds keep invitations on their own HTTPS origin so testers are not redirected to production. The application consumes and immediately removes either fragment from the address bar. URL fragments are not sent in ordinary HTTP requests. Rotating a group join token invalidates old invitations without disconnecting current members.
-- In a private room, text, files, voice notes, and call signaling travel over the direct two-party Tailcat relationship with WireGuard encryption. In Group Beta, every sender–host or sender–recipient Tailcat link is encrypted under the trust model above.
+- Text, voice notes, authorization and signaling use Tailcat/WireGuard. When enabled and negotiated, private and group file bodies use a separate reliable WebRTC DataChannel with DTLS encryption; otherwise they use Tailcat/WireGuard through DERP. Direct file peers may learn each other's public IP, even without a call. Group trust remains as described above.
 - Browser Tailcat traffic currently passes through DERP. A relay cannot read encrypted content but can observe IP addresses, time, relay region, approximate volume, and traffic patterns.
 - Live media uses browser WebRTC DTLS-SRTP and `stun:stun.cloudflare.com:3478`, with no TURN fallback. The peer and STUN service may see public IP information, and calls may fail on restrictive networks.
 - In a private one-to-one room, a file of up to and including 100 MiB is automatically accepted only when safe OPFS staging is available and a trustworthy capacity estimate confirms enough space. Each authenticated private session can auto-receive at most 20 files and 500 MiB in total; a zero-byte file counts toward the file limit, reaching either limit makes later files manual, and a new authenticated session resets both counters. Larger files, or files that cannot be staged safely, still require approval and a user-selected destination. The app never automatically opens, previews, or malware-scans a file; after size and SHA-256 verification, the recipient chooses whether to open, save, share, or delete it. Every group file and group voice note still requires each selected recipient's approval, and one recipient's rejection or failure does not stop the others.
@@ -76,7 +76,7 @@ For OPFS receive, the app uses a random transfer identifier rather than the offe
 
 ## Build locally
 
-The release toolchain is fixed at Go `1.27.0`. The repository has no Node build step and all browser assets are local.
+The release toolchain is fixed at Go `1.27.0`; Node.js 24 generates the deterministic source/dependency/SHA-256 manifest. All browser assets remain local, with no frontend package runtime or third-party scripts.
 
 ```sh
 go version
