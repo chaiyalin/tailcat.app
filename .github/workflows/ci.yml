@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/mobile-support]
+    branches: [main, feature/mobile-support, feature/group-rooms-v2]
   pull_request:
   workflow_dispatch:
 
@@ -52,12 +52,16 @@ jobs:
           PAGES_BUILD: "1"
         run: ./build.sh dist
 
+      - name: Verify release-switch and version contracts
+        run: bash tests/e2e/release-contract.sh
+
       - name: Enforce Cloudflare Pages artifact limits
         shell: bash
         run: |
-          for required in index.html app.js file-sinks.js mobile-runtime.js opfs-worker.js wasm_exec.js main.wasm.gz LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
+          for required in index.html 404.html robots.txt _headers app.js config.js runtime-config.js group-protocol.js group-room.js file-sinks.js mobile-runtime.js opfs-worker.js wasm_exec.js main.wasm.gz privacy/index.html terms/index.html security/index.html acceptable-use/index.html LICENSE THIRD_PARTY_NOTICES.md licenses/APACHE-2.0.txt; do
             test -s "dist/$required"
           done
+          test -e dist/.nojekyll
           test ! -e dist/main.wasm
           oversized="$(find dist -type f -size +26214400c -print)"
           if [[ -n "$oversized" ]]; then

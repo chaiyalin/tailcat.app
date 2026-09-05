@@ -9,6 +9,20 @@ import {
 } from "./file-sinks.js";
 import { createI18n } from "./i18n.js";
 import {
+  GROUP_PROTOCOL_VERSION,
+  GroupFrameReader,
+  GroupFrameWriter,
+  GroupReplayBuffer,
+  RecentEventDeduper,
+  groupBatchBytes,
+  makeGroupInviteURL,
+  normalizeGroupDisplayName,
+  parseGroupInviteFragment,
+  randomBase64URL,
+  validBase64URL,
+} from "./group-protocol.js";
+import { GroupRoomController } from "./group-room.js";
+import {
   createScreenWakeLockManager,
   inspectMobileRuntime,
   subscribePageLifecycle,
@@ -23,13 +37,31 @@ const i18n = createI18n();
 const { t } = i18n;
 const TCH_MAGIC = new Uint8Array([0x54, 0x43, 0x48, 0x31]); // TCH1
 const TCF_MAGIC = new Uint8Array([0x54, 0x43, 0x46, 0x31]); // TCF1
+const TCV_MAGIC = new Uint8Array([0x54, 0x43, 0x56, 0x31]); // TCV1 group voice
 const FILE_FRAME = Object.freeze({ META: 1, DATA: 2, FINAL: 3, CANCEL: 4 });
 const DB_NAME = "tailcat-app";
 const DB_STORE = "private-settings";
 const DB_KEY = "remembered-listener";
 const CANONICAL_ORIGIN = "https://tailcat.app/";
 const STREAM_READ_TIMEOUT_MS = 30_000;
+// The Go/WASM bridge intentionally exposes at most one 64 KiB network read.
+// Exact protocol reads pass their remaining length as a smaller bound so a
+// frame body can never be pulled into JavaScript before its header is accepted.
+const CONNECTION_READ_MAX_BYTES = 64 * 1024;
 const FILE_DECISION_TIMEOUT_MS = 2 * 60 * 1000;
+const GROUP_TICKET_CONTROL_TIMEOUT_MS = APP_CONFIG.group.ticketControlTimeoutMs || STREAM_READ_TIMEOUT_MS;
+// Covers offer parsing, ticket validation, bounded local capacity checks, the
+// complete user decision window, and the response write. A sender must never
+// time out before a receiver's legitimate 120-second consent window ends.
+const TRANSFER_DECISION_DEADLINE_MS = FILE_DECISION_TIMEOUT_MS
+  + GROUP_TICKET_CONTROL_TIMEOUT_MS
+  + (3 * STREAM_READ_TIMEOUT_MS)
+  + 5_000;
+const VOICE_DECISION_DEADLINE_MS = TRANSFER_DECISION_DEADLINE_MS;
+const VOICE_DATA_DEADLINE_MS = APP_CONFIG.limits.voiceSeconds * 1000 + STREAM_READ_TIMEOUT_MS;
+const FILE_DATA_MIN_BYTES_PER_SECOND = 64 * 1024;
+const FILE_DATA_MAX_DEADLINE_MS = 2 * 60 * 60 * 1000;
+const TRANSFER_CANCEL_MAX_BYTES = 2 * 1024;
 // A complete handshake can require three sequential Tailcat dials. Each dial
 // may take up to roughly one minute while a DERP path is established.
 const HANDSHAKE_TIMEOUT_MS = 4 * 60 * 1000;
@@ -56,23 +88,34 @@ const VOICE_MIME_CANDIDATES = Object.freeze([
 // Cloudflare logs; removing it also avoids leaking it in screenshots/history.
 function consumeInviteFragment() {
   const raw = location.hash.slice(1);
-  if (!raw) return "";
+  if (!raw) return Object.freeze({ address: "", group: null });
   let address = "";
+  let group = null;
   try {
     const fragment = new URLSearchParams(raw);
-    if (!fragment.has("invite") && !fragment.has("v")) return "";
-    if (fragment.get("v") === String(APP_CONFIG.protocolVersion)) {
+    if (!fragment.has("invite") && !fragment.has("v")) return Object.freeze({ address: "", group: null });
+    group = parseGroupInviteFragment(fragment, {
+      appVersion: APP_CONFIG.protocolVersion,
+      validAddress,
+    });
+    if (!group
+      && fragment.get("mode") !== "group"
+      && fragment.get("v") === String(APP_CONFIG.protocolVersion)) {
       address = fragment.get("invite") || "";
     }
   } catch (_) {
-    return "";
+    return Object.freeze({ address: "", group: null });
   }
   history.replaceState(null, "", `${location.pathname}${location.search}`);
-  return validAddress(address) ? address : "";
+  return Object.freeze({ address: validAddress(address) ? address : "", group });
 }
 
 const hadInviteFragment = Boolean(location.hash);
-let pendingInviteAddress = consumeInviteFragment();
+const consumedInvite = consumeInviteFragment();
+let pendingInviteAddress = consumedInvite.address;
+let pendingGroupInvite = consumedInvite.group;
+let groupRoom = null;
+let listenerMode = "none";
 
 function validAddress(value) {
   return typeof value === "string"
@@ -83,9 +126,26 @@ function validAddress(value) {
 }
 
 function inviteURL(address) {
-  const url = new URL(CANONICAL_ORIGIN);
+  const url = new URL(invitationOrigin());
   url.hash = new URLSearchParams({ v: String(APP_CONFIG.protocolVersion), invite: address }).toString();
   return url.toString();
+}
+
+function invitationOrigin() {
+  if (APP_CONFIG.previewInvitesEnabled && location.protocol === "https:") {
+    return new URL("/", location.origin).toString();
+  }
+  return CANONICAL_ORIGIN;
+}
+
+function groupInviteURL() {
+  if (!groupRoom?.roomId || !groupRoom.joinToken || !groupRoom.hostAddress) return "";
+  return makeGroupInviteURL(invitationOrigin(), {
+    address: groupRoom.hostAddress,
+    roomId: groupRoom.roomId,
+    joinToken: groupRoom.joinToken,
+    appVersion: APP_CONFIG.protocolVersion,
+  });
 }
 
 function browserSupport() {
@@ -154,6 +214,7 @@ const tcTest = {
     version: APP_CONFIG.protocolVersion,
     file: "TCF1",
     chunkBytes: APP_CONFIG.limits.fileChunkBytes,
+    privateFileAutoReceiveBytes: APP_CONFIG.limits.privateFileAutoReceiveBytes,
     ports: APP_CONFIG.ports,
   }),
 };
@@ -168,9 +229,15 @@ let fileSinkSupport = Object.freeze({
 });
 let pageWasBackgrounded = false;
 let resumeCheckInFlight = null;
+let groupCreateOperation = 0;
+let groupJoinOperation = 0;
+let groupWakeLockFailed = false;
+let qrScope = null;
 const transferItemCleanups = new WeakMap();
 const stagedTransferItems = new Set();
-const wakeLocks = createScreenWakeLockManager({ onError: recordError });
+const groupTransferItems = new Set();
+const groupTransferRooms = new WeakMap();
+const wakeLocks = createScreenWakeLockManager({ onError: handleWakeLockError });
 const visualViewportSync = syncVisualViewportCSSVariables();
 
 function redact(value) {
@@ -179,10 +246,35 @@ function redact(value) {
     .replace(/#(?:[^\s"']+)/g, "#[invite-removed]");
 }
 
-function recordError(error) {
-  const message = redact(error?.message || error);
+function groupErrorCategory(error) {
+  const raw = String(error?.message || error);
+  if (/(?:timed? out|timeout|expired)/iu.test(raw)) return "GROUP_TIMEOUT";
+  if (/(?:queue|slow|backpressure|busy)/iu.test(raw)) return "GROUP_BACKPRESSURE";
+  if (/(?:invalid|reject|forg|cross-|protocol|ticket|session)/iu.test(raw)) return "GROUP_PROTOCOL_REJECTED";
+  return "GROUP_RUNTIME_ERROR";
+}
+
+function recordError(error, scope = "auto") {
+  const groupScoped = scope === "group"
+    || (scope === "auto" && (groupRoom?.active || listenerMode === "group"));
+  const message = groupScoped ? groupErrorCategory(error) : redact(error?.message || error);
   tcTest.errors.push(message.slice(0, 500));
   if (tcTest.errors.length > 30) tcTest.errors.shift();
+}
+
+function recordGroupError(error) {
+  recordError(error, "group");
+}
+
+function handleWakeLockError(error) {
+  if (support.mobile && groupRoom?.mode === "owner") {
+    recordGroupError(error);
+    groupWakeLockFailed = true;
+    $("group-wake-lock-alert").classList.remove("hidden");
+    setStatus(t("group_wake_lock_failed"), "error");
+  } else {
+    recordError(error);
+  }
 }
 
 window.addEventListener("error", (event) => recordError(event.error || event.message));
@@ -274,8 +366,55 @@ function selectedVoiceRecordType() {
   return selectMutualVoiceType(recordableVoiceTypes(), peerCapabilities?.voice?.playTypes);
 }
 
+function groupMemberSupportsVoiceMime(member, mime) {
+  const normalized = safeVoiceMime(mime);
+  return Boolean(normalized && (member?.capabilities?.voice?.playTypes || [])
+    .map(safeVoiceMime)
+    .includes(normalized));
+}
+
+function selectedGroupVoiceRecordType(recipients = selectedGroupMembers()) {
+  const capable = recipients.filter((member) => groupMemberCanReceive(member, "voice"));
+  const localTypes = recordableVoiceTypes().map(safeVoiceMime).filter(Boolean);
+  let best = "";
+  let bestCount = 0;
+  for (const type of localTypes) {
+    const count = capable.filter((member) => groupMemberSupportsVoiceMime(member, type)).length;
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 function validFileSize(size) {
   return Number.isSafeInteger(size) && size >= 0 && size <= APP_CONFIG.limits.fileBytes;
+}
+
+function resetPrivateAutoReceiveBudget(session = "") {
+  privateAutoReceiveBudget = { session, bytes: 0, items: 0 };
+}
+
+function canAutoReceivePrivateFile(size, session) {
+  return Number.isSafeInteger(size)
+    && size >= 0
+    && size <= APP_CONFIG.limits.privateFileAutoReceiveBytes
+    && privateAutoReceiveBudget.session === session
+    && privateAutoReceiveBudget.items < APP_CONFIG.limits.privateFileAutoReceiveSessionItems
+    && privateAutoReceiveBudget.bytes + size <= APP_CONFIG.limits.privateFileAutoReceiveSessionBytes
+    && stagedTransferItems.size < APP_CONFIG.limits.privateFileAutoReceiveSessionItems
+    && fileSinkSupport.opfs.receivable === true
+    && Number(fileSinkSupport.opfs.maxBytes) >= size;
+}
+
+function consumePrivateAutoReceiveBudget(size, session) {
+  if (privateAutoReceiveBudget.session !== session) return false;
+  if (privateAutoReceiveBudget.items >= APP_CONFIG.limits.privateFileAutoReceiveSessionItems
+    || privateAutoReceiveBudget.bytes + size > APP_CONFIG.limits.privateFileAutoReceiveSessionBytes) return false;
+  privateAutoReceiveBudget.items += 1;
+  privateAutoReceiveBudget.bytes += size;
+  return true;
 }
 
 function setStatus(message, state = "loading") {
@@ -284,7 +423,7 @@ function setStatus(message, state = "loading") {
 }
 
 function setMobileSheet(open) {
-  const hasRoomControls = Boolean(activeSession || stagedTransferItems.size);
+  const hasRoomControls = Boolean(activeSession || groupRoom?.active || stagedTransferItems.size);
   const expanded = Boolean(open && support.mobile && hasRoomControls);
   $("app").dataset.mobileSheet = expanded ? "open" : "closed";
   $("mobile-menu-btn")?.setAttribute("aria-expanded", String(expanded));
@@ -299,6 +438,7 @@ function setMobileState(state) {
 
 function restingMobileState() {
   if (stagedTransferItems.size) return "connected";
+  if (groupRoom?.active) return groupRoom.mode === "pending" ? "connecting" : "connected";
   return listener ? "waiting" : "landing";
 }
 
@@ -334,6 +474,9 @@ async function refreshFileSinkSupport() {
     maxBytes: fileSinkSupport.maxBytes,
     picker: fileSinkSupport.picker.supported,
     opfs: fileSinkSupport.opfs.receivable,
+    privateAutoReceiveMaxBytes: fileSinkSupport.opfs.receivable
+      ? Math.min(APP_CONFIG.limits.privateFileAutoReceiveBytes, fileSinkSupport.opfs.maxBytes)
+      : 0,
   };
   renderRuntimeCapabilityNote();
   return fileSinkSupport;
@@ -348,6 +491,17 @@ function setComposerEnabled(enabled) {
     $(id).disabled = !enabled;
   }
   const capabilities = localCapabilities();
+  if (groupRoom?.active) {
+    const recipients = selectedGroupMembers();
+    $("voice-call-btn").disabled = true;
+    $("video-call-btn").disabled = true;
+    $("screen-share-btn").disabled = true;
+    $("attach-btn").disabled = !enabled || !recipients.some((member) => groupMemberCanReceive(member, "file"));
+    $("ptt-btn").disabled = !enabled
+      || !capabilities.voice.enabled
+      || !recipients.some((member) => groupMemberCanReceive(member, "voice"));
+    return;
+  }
   $("voice-call-btn").disabled = !enabled || !capabilities.rtc.voice || peerCapabilities?.rtc?.voice !== true;
   $("video-call-btn").disabled = !enabled || !capabilities.rtc.video || peerCapabilities?.rtc?.video !== true;
   $("attach-btn").disabled = !enabled || !peerCanReceiveFiles();
@@ -402,10 +556,11 @@ renderRuntimeCapabilityNote();
 if (!support.ok) {
   $("app").classList.add("hidden");
   $("browser-blocker").classList.remove("hidden");
-  $("blocked-invite-copy").classList.toggle("hidden", !pendingInviteAddress);
+  $("blocked-invite-copy").classList.toggle("hidden", !pendingInviteAddress && !pendingGroupInvite);
   $("copy-blocked-invite").addEventListener("click", () => {
-    if (pendingInviteAddress) {
-      void copyWithFeedback($("copy-blocked-invite"), inviteURL(pendingInviteAddress), "copy_preserved_invite");
+    const value = pendingGroupInvite ? groupInviteFor(pendingGroupInvite) : inviteURL(pendingInviteAddress);
+    if (value) {
+      void copyWithFeedback($("copy-blocked-invite"), value, "copy_preserved_invite");
     }
   });
   tcTest.state.transport = "unsupported";
@@ -530,7 +685,11 @@ class ConnectionReader {
         }
         continue;
       }
-      const chunk = await readConnectionChunk(this.connection, this.timeoutMs);
+      const chunk = await readConnectionChunk(
+        this.connection,
+        this.timeoutMs,
+        Math.min(length - written, CONNECTION_READ_MAX_BYTES),
+      );
       if (chunk === null) {
         this.ended = true;
         throw new Error("unexpected end of stream");
@@ -543,11 +702,14 @@ class ConnectionReader {
   }
 }
 
-async function readConnectionChunk(connection, timeoutMs = STREAM_READ_TIMEOUT_MS) {
+async function readConnectionChunk(connection, timeoutMs = STREAM_READ_TIMEOUT_MS, maximumBytes = 0) {
   let timer = null;
   try {
+    const read = Number.isSafeInteger(maximumBytes) && maximumBytes > 0
+      ? connection.read(maximumBytes)
+      : connection.read();
     return await Promise.race([
-      connection.read(),
+      read,
       new Promise((_, reject) => {
         timer = setTimeout(() => {
           connection.close();
@@ -558,6 +720,40 @@ async function readConnectionChunk(connection, timeoutMs = STREAM_READ_TIMEOUT_M
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function withConnectionDeadline(connection, operation, timeoutMs, message) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          safeConnectionClose(connection);
+          reject(new Error(message));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function fileDataDeadlineMs(size) {
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error("invalid file size for deadline");
+  const transferMs = Math.ceil(size / FILE_DATA_MIN_BYTES_PER_SECOND * 1000);
+  return Math.min(FILE_DATA_MAX_DEADLINE_MS, STREAM_READ_TIMEOUT_MS + transferMs);
+}
+
+function withConnectionUntil(connection, operation, deadlineAt, message) {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) {
+    safeConnectionClose(connection);
+    // Observe a late failure from an operation that was started by the caller.
+    void Promise.resolve(operation).catch(() => {});
+    return Promise.reject(new Error(message));
+  }
+  return withConnectionDeadline(connection, operation, remaining, message);
 }
 
 function packChatEnvelope(meta, payload = new Uint8Array()) {
@@ -577,6 +773,89 @@ function unpackChatEnvelope(bytes) {
   return { meta, payload: bytes.subarray(8 + jsonLength) };
 }
 
+async function readChatEnvelopeStream(connection, maximumPayload, totalTimeoutMs, inspectMeta = null) {
+  const reader = new ConnectionReader(connection);
+  const magic = await reader.readExact(4);
+  if (!equalBytes(magic, TCH_MAGIC)) throw new Error("invalid TCH1 envelope");
+  return readChatEnvelopeStreamBody(connection, reader, maximumPayload, totalTimeoutMs, inspectMeta);
+}
+
+async function readChatEnvelopeStreamBody(connection, reader, maximumPayload, totalTimeoutMs, inspectMeta = null) {
+  const lengthBytes = await reader.readExact(4);
+  const jsonLength = new DataView(lengthBytes.buffer, lengthBytes.byteOffset, 4).getUint32(0, false);
+  if (jsonLength > APP_CONFIG.limits.controlBytes) throw new Error("invalid TCH1 header length");
+  const meta = JSON.parse(decoder.decode(await reader.readExact(jsonLength)));
+  if (inspectMeta) await inspectMeta(meta);
+  const chunks = [];
+  let total = 0;
+  const buffered = reader.buffer.subarray(reader.offset);
+  if (buffered.length) {
+    if (buffered.length > maximumPayload) throw new Error("message payload exceeds its limit");
+    chunks.push(buffered.slice());
+    total += buffered.length;
+    reader.buffer = new Uint8Array(0);
+    reader.offset = 0;
+  }
+  const deadline = Date.now() + totalTimeoutMs;
+  while (!reader.ended) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("message deadline exceeded");
+    const chunk = await readConnectionChunk(connection, Math.min(STREAM_READ_TIMEOUT_MS, remaining));
+    if (chunk === null) break;
+    if (chunk.length > maximumPayload - total) throw new Error("message payload exceeds its limit");
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  return { meta, payload: concatBytes(...chunks) };
+}
+
+function packGroupVoiceFrame(meta, payload = new Uint8Array()) {
+  if (!(payload instanceof Uint8Array)) throw new TypeError("voice payload must be Uint8Array");
+  if (payload.length > APP_CONFIG.limits.voiceBytes) throw new Error("voice payload exceeds its limit");
+  const json = encoder.encode(JSON.stringify({ ...meta, v: APP_CONFIG.protocolVersion }));
+  if (!json.length || json.length > APP_CONFIG.limits.controlBytes) throw new Error("voice header exceeds its limit");
+  const header = new Uint8Array(12);
+  header.set(TCV_MAGIC);
+  const view = new DataView(header.buffer);
+  view.setUint32(4, json.length, false);
+  view.setUint32(8, payload.length, false);
+  return concatBytes(header, json, payload);
+}
+
+async function readGroupVoiceFrameHead(reader, maximumPayload, { magicRead = false } = {}) {
+  if (!magicRead) {
+    const magic = await reader.readExact(4);
+    if (!equalBytes(magic, TCV_MAGIC)) throw new Error("invalid TCV1 voice frame");
+  }
+  const lengths = await reader.readExact(8);
+  const view = new DataView(lengths.buffer, lengths.byteOffset, lengths.byteLength);
+  const jsonLength = view.getUint32(0, false);
+  const payloadLength = view.getUint32(4, false);
+  if (!jsonLength
+    || jsonLength > APP_CONFIG.limits.controlBytes
+    || payloadLength > maximumPayload) throw new Error("invalid TCV1 voice frame length");
+  let meta;
+  try {
+    meta = JSON.parse(decoder.decode(await reader.readExact(jsonLength)));
+  } catch (_) {
+    throw new Error("invalid TCV1 voice metadata");
+  }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) throw new Error("invalid TCV1 voice metadata");
+  return Object.freeze({ meta, payloadLength });
+}
+
+async function readGroupVoiceFramePayload(reader, head) {
+  if (!head || !Number.isSafeInteger(head.payloadLength) || head.payloadLength < 0) {
+    throw new Error("invalid TCV1 voice frame header");
+  }
+  const payload = head.payloadLength ? await reader.readExact(head.payloadLength) : new Uint8Array();
+  return { meta: head.meta, payload };
+}
+
+async function readGroupVoiceFrame(reader, maximumPayload, options = {}) {
+  return readGroupVoiceFramePayload(reader, await readGroupVoiceFrameHead(reader, maximumPayload, options));
+}
+
 function packFileFrame(kind, payload = new Uint8Array()) {
   if (!(payload instanceof Uint8Array)) throw new TypeError("frame payload must be Uint8Array");
   const header = new Uint8Array(5);
@@ -591,7 +870,7 @@ function packFileJSON(kind, value) {
   return packFileFrame(kind, payload);
 }
 
-async function readFileFrame(reader) {
+async function readFileFrameHeader(reader) {
   const header = await reader.readExact(5);
   const kind = header[0];
   const length = new DataView(header.buffer, header.byteOffset, header.byteLength).getUint32(1, false);
@@ -599,7 +878,16 @@ async function readFileFrame(reader) {
   if (![FILE_FRAME.META, FILE_FRAME.DATA, FILE_FRAME.FINAL, FILE_FRAME.CANCEL].includes(kind) || length > maximum) {
     throw new Error("invalid TCF1 frame");
   }
-  return { kind, payload: await reader.readExact(length) };
+  return Object.freeze({ kind, length });
+}
+
+async function readFileFramePayload(reader, header) {
+  if (!header || !Number.isSafeInteger(header.length) || header.length < 0) throw new Error("invalid TCF1 frame header");
+  return { kind: header.kind, payload: await reader.readExact(header.length) };
+}
+
+async function readFileFrame(reader) {
+  return readFileFramePayload(reader, await readFileFrameHeader(reader));
 }
 
 function decodeFileJSON(frame, allowedKinds = [FILE_FRAME.META, FILE_FRAME.FINAL, FILE_FRAME.CANCEL]) {
@@ -657,10 +945,12 @@ async function sendChatEnvelopeTo(address, meta, payload, port, responseTimeoutM
 
 let listener = null;
 let listenerStarting = null;
+let listenerStartingMode = "none";
 let localAddress = "";
 let activePeerAddress = "";
 let activePeerNonce = "";
 let activeSession = "";
+let privateAutoReceiveBudget = { session: "", bytes: 0, items: 0 };
 let peerCapabilities = null;
 let pendingPeerAddress = "";
 let pendingHandshakeNonce = "";
@@ -676,6 +966,14 @@ let lastAuthenticatedPeerTrafficAt = 0;
 const inboundConnectionCounts = new Map();
 const handshakeReplyTimes = [];
 let activeHandshakeRejects = 0;
+let groupPendingTicker = null;
+let groupBackgroundedAt = 0;
+let groupBackgroundCloseTimer = null;
+const groupTransferConnections = new Set();
+const groupOutgoingTransfers = new Set();
+let groupTransferGeneration = 0;
+let groupTextEventCount = 0;
+let previousGroupMode = "none";
 
 function canSendHandshakeReply() {
   const cutoff = Date.now() - HANDSHAKE_REPLY_WINDOW_MS;
@@ -738,8 +1036,415 @@ function validCapabilities(value) {
   return value && typeof value === "object" ? value : {};
 }
 
+function groupFeatureAvailable() {
+  return APP_CONFIG.groupRoomsEnabled && APP_CONFIG.group.enabled;
+}
+
+function ensureGroupRoom() {
+  if (groupRoom) return groupRoom;
+  groupRoom = new GroupRoomController({
+    config: APP_CONFIG.group,
+    appVersion: APP_CONFIG.protocolVersion,
+    port: APP_CONFIG.group.port,
+    limits: APP_CONFIG.limits,
+    validAddress,
+    capabilities: localCapabilities,
+    connect: ({ addr, signal }) => tailcatConnect({ addr, derpMapURL: APP_CONFIG.derpMapURL, signal }),
+    onState: renderGroupState,
+    onPending: renderGroupPending,
+    onEvent: renderGroupEvent,
+    onStatus: handleGroupStatus,
+    onClosed: handleGroupClosed,
+  });
+  return groupRoom;
+}
+
+function groupInviteFor(invite) {
+  if (!invite) return "";
+  return makeGroupInviteURL(invitationOrigin(), {
+    address: invite.address,
+    roomId: invite.roomId,
+    joinToken: invite.joinToken,
+    appVersion: APP_CONFIG.protocolVersion,
+  });
+}
+
+function groupMemberById(memberId) {
+  return groupRoom?.snapshot().members.find((member) => member.id === memberId) || null;
+}
+
+function groupMemberIdentity(member) {
+  if (!member) return `${t("group_role_member")} · #??????`;
+  return `${member.displayName} · #${member.code}${member.role === "owner" ? ` · ${t("group_role_owner")}` : ""}`;
+}
+
+function selectedGroupRecipientIds() {
+  return [...document.querySelectorAll("#group-recipient-list .group-recipient-checkbox:checked")]
+    .map((input) => input.value)
+    .filter(Boolean);
+}
+
+function selectedGroupMembers() {
+  const selected = new Set(selectedGroupRecipientIds());
+  return groupRoom?.snapshot().members.filter((member) => selected.has(member.id)) || [];
+}
+
+function groupMemberCanReceive(member, kind, size = 0) {
+  if (!member || member.status !== "online") return false;
+  if (kind === "file") {
+    return member.capabilities?.file?.protocol === "TCF1"
+      && member.capabilities.file.receive === true
+      && Number(member.capabilities.file.maxBytes) >= size;
+  }
+  return member.capabilities?.voice?.enabled === true
+    && Number(member.capabilities.voice.maxBytes) >= size;
+}
+
+function updateGroupRecipientSummary() {
+  const count = selectedGroupRecipientIds().length;
+  $("group-recipient-summary").textContent = count
+    ? format("group_recipient_summary", { count })
+    : t("group_no_recipients");
+  const choices = [...document.querySelectorAll("#group-recipient-list .group-recipient-checkbox:not(:disabled)")];
+  $("group-recipient-all").checked = Boolean(choices.length && choices.every((input) => input.checked));
+  $("group-recipient-all").indeterminate = Boolean(count && !$("group-recipient-all").checked);
+  if (groupRoom?.active) setComposerEnabled(groupRoom.canSend);
+}
+
+function renderGroupRecipients(snapshot) {
+  const selected = new Set(selectedGroupRecipientIds());
+  const container = $("group-recipient-list");
+  container.replaceChildren();
+  for (const member of snapshot.members) {
+    if (member.id === snapshot.memberId) continue;
+    const fragment = $("group-recipient-template").content.cloneNode(true);
+    const input = fragment.querySelector(".group-recipient-checkbox");
+    input.value = member.id;
+    input.checked = selected.has(member.id) && member.status === "online";
+    input.disabled = member.status !== "online"
+      || (!groupMemberCanReceive(member, "file") && !groupMemberCanReceive(member, "voice"));
+    fragment.querySelector(".group-recipient-name").textContent = member.displayName;
+    fragment.querySelector(".group-recipient-code").textContent = `#${member.code}`;
+    input.addEventListener("change", updateGroupRecipientSummary);
+    container.append(fragment);
+  }
+  updateGroupRecipientSummary();
+}
+
+function renderGroupMembers(snapshot) {
+  const list = $("group-members-list");
+  list.replaceChildren();
+  for (const member of snapshot.members) {
+    const fragment = $("group-member-template").content.cloneNode(true);
+    i18n.apply(fragment);
+    const item = fragment.querySelector(".group-member-item");
+    item.dataset.memberId = member.id;
+    fragment.querySelector(".group-member-avatar").textContent = Array.from(member.displayName)[0]?.toUpperCase() || "?";
+    fragment.querySelector(".group-member-name").textContent = member.displayName;
+    fragment.querySelector(".group-member-code").textContent = `#${member.code}`;
+    fragment.querySelector(".group-member-role").textContent = member.role === "owner"
+      ? t("group_role_owner")
+      : t("group_role_member");
+    const memberState = fragment.querySelector(".group-member-state");
+    memberState.dataset.state = member.status;
+    memberState.textContent = member.status === "online"
+      ? t("group_member_online")
+      : t("group_member_reconnecting");
+    const remove = fragment.querySelector(".group-remove-member");
+    remove.classList.toggle("hidden", snapshot.mode !== "owner" || member.role === "owner");
+    remove.addEventListener("click", () => void groupRoom?.removeMember(member.id));
+    list.append(fragment);
+  }
+}
+
+function renderGroupPending(pending) {
+  if (groupRoom?.mode !== "owner") return;
+  clearInterval(groupPendingTicker);
+  groupPendingTicker = null;
+  const list = $("group-pending-list");
+  const updateExpiry = (item, request) => {
+    item.querySelector(".group-pending-expiry").textContent = format("group_request_expires", {
+      seconds: Math.max(0, Math.ceil((request.expiresAt - Date.now()) / 1000)),
+    });
+  };
+  const render = (current) => {
+    $("group-pending-count").textContent = format("group_pending_count", { count: current.length });
+    $("group-pending-panel").classList.toggle("hidden", current.length === 0);
+    const existing = new Map([...list.children].map((item) => [item.dataset.requestId, item]));
+    for (const request of current) {
+      let item = existing.get(request.requestId);
+      if (!item) {
+        const fragment = $("group-pending-template").content.cloneNode(true);
+        i18n.apply(fragment);
+        item = fragment.querySelector(".group-pending-item");
+        item.dataset.requestId = request.requestId;
+        const approve = item.querySelector(".group-approve-join");
+        const reject = item.querySelector(".group-reject-join");
+        approve.addEventListener("click", () => {
+          approve.disabled = true;
+          reject.disabled = true;
+          void groupRoom?.approvePending(request.requestId);
+        });
+        reject.addEventListener("click", () => {
+          approve.disabled = true;
+          reject.disabled = true;
+          void groupRoom?.rejectPending(request.requestId);
+        });
+        list.append(fragment);
+      }
+      existing.delete(request.requestId);
+      item.querySelector(".group-pending-name").textContent = request.displayName;
+      item.querySelector(".group-pending-code").textContent = `#${request.code}`;
+      updateExpiry(item, request);
+      const approve = item.querySelector(".group-approve-join");
+      const reject = item.querySelector(".group-reject-join");
+      approve.disabled = request.state !== "pending";
+      reject.disabled = request.state !== "pending";
+    }
+    for (const item of existing.values()) item.remove();
+  };
+  render(groupRoom?.snapshot().pending || pending);
+  if (pending.length) groupPendingTicker = setInterval(() => {
+    const current = groupRoom?.snapshot().pending || [];
+    const byId = new Map(current.map((request) => [request.requestId, request]));
+    for (const item of list.children) {
+      const request = byId.get(item.dataset.requestId);
+      if (request) updateExpiry(item, request);
+    }
+  }, 1000);
+}
+
+function updateGroupTestState(snapshot) {
+  tcTest.group = {
+    enabled: groupFeatureAvailable(),
+    mode: snapshot.mode,
+    members: snapshot.members.length,
+    online: snapshot.members.filter((member) => member.status === "online").length,
+    pending: snapshot.pending.length,
+    sequence: snapshot.sequence,
+    paused: snapshot.roomPaused,
+    textEvents: groupTextEventCount,
+  };
+}
+
+function renderGroupState(snapshot) {
+  if (previousGroupMode === "none" && snapshot.mode !== "none") groupTextEventCount = 0;
+  previousGroupMode = snapshot.mode;
+  updateGroupTestState(snapshot);
+  const active = snapshot.mode !== "none";
+  const admitted = snapshot.mode === "owner" || snapshot.mode === "member";
+  document.querySelector(".room-panel")?.classList.toggle("hidden", active);
+  document.querySelector(".join-panel")?.classList.toggle("hidden", active);
+  document.querySelector(".live-panel")?.classList.toggle("hidden", active);
+  const secureLabel = document.querySelector(".secure-badge [data-i18n]");
+  if (secureLabel) {
+    const key = active ? "group_secure" : "secure";
+    secureLabel.dataset.i18n = key;
+    secureLabel.textContent = t(key);
+  }
+  const encryptionNote = $("encryption-note");
+  if (encryptionNote) {
+    const key = active ? "group_trust_body" : "encryption_note";
+    encryptionNote.dataset.i18n = key;
+    encryptionNote.textContent = t(key);
+  }
+  $("send-text").placeholder = t(active ? "group_message_placeholder" : "message_placeholder");
+  const composerHint = document.querySelector(".composer-hint");
+  if (composerHint) {
+    const key = active ? "group_composer_hint" : "composer_hint";
+    composerHint.dataset.i18n = key;
+    composerHint.textContent = t(key);
+  }
+  $("private-file-auto-note").classList.toggle("hidden", active);
+  $("group-room-panel").classList.toggle("hidden", !admitted);
+  $("group-wake-lock-alert").classList.toggle(
+    "hidden",
+    !(groupWakeLockFailed && support.mobile && snapshot.mode === "owner"),
+  );
+  $("group-waiting-panel").classList.toggle("hidden", snapshot.mode !== "pending");
+  $("group-recipient-panel").classList.toggle("hidden", !admitted);
+  $("group-create-entry").classList.toggle("hidden", active || !tcTest.ready || !groupFeatureAvailable());
+  if (!active) {
+    clearInterval(groupPendingTicker);
+    groupPendingTicker = null;
+    $("group-members-list").replaceChildren();
+    $("group-pending-list").replaceChildren();
+    $("group-recipient-list").replaceChildren();
+    $("peer-label").textContent = t("waiting_peer");
+    setComposerEnabled(Boolean(activeSession));
+    return;
+  }
+  if (snapshot.mode === "pending") {
+    setMobileState("connecting");
+    setComposerEnabled(false);
+    return;
+  }
+  const online = snapshot.members.filter((member) => member.status === "online").length;
+  $("group-room-count").textContent = `${online} / ${APP_CONFIG.group.maxMembers}`;
+  $("group-room-role").textContent = snapshot.mode === "owner" ? t("group_role_owner") : t("group_role_member");
+  $("group-room-status").textContent = snapshot.roomPaused ? t("group_status_paused") : t("group_status_active");
+  $("group-invite-card").classList.toggle("hidden", snapshot.mode !== "owner");
+  document.querySelector(".group-owner-controls")?.classList.toggle("hidden", snapshot.mode !== "owner");
+  $("group-leave-room-btn").classList.toggle("hidden", snapshot.mode !== "member");
+  if (snapshot.mode === "owner") {
+    const value = groupInviteURL();
+    $("group-invite-link").textContent = value;
+    $("group-pause-joins-btn").textContent = snapshot.joinsPaused ? t("group_resume_joins") : t("group_pause_joins");
+  }
+  renderGroupMembers(snapshot);
+  renderGroupRecipients(snapshot);
+  if (snapshot.mode === "owner") renderGroupPending(snapshot.pending);
+  $("peer-label").textContent = snapshot.mode === "owner" ? t("group_role_owner") : t("group_role_member");
+  setMobileState("connected");
+  setStatus(snapshot.roomPaused ? t("group_status_paused") : t("group_status_active"), snapshot.roomPaused ? "loading" : "connected");
+  setComposerEnabled(groupRoom.canSend);
+}
+
+function renderGroupEvent(event) {
+  if (event.type === "TEXT") {
+    groupTextEventCount += 1;
+    if (tcTest.group) tcTest.group.textEvents = groupTextEventCount;
+    const member = groupMemberById(event.senderId);
+    if (!member) return;
+    const mine = event.senderId === groupRoom?.memberId;
+    const submitted = mine ? pendingGroupDrafts.get(event.clientEventId) : null;
+    if (submitted?.roomId === groupRoom?.roomId && submitted.text === event.text) {
+      pendingGroupDrafts.delete(event.clientEventId);
+      if (isRenderedMessage(submitted.message)) {
+        updateMessageDelivery(submitted.message, "delivered");
+      } else {
+        addMessage({
+          type: "text",
+          text: event.text,
+          mine: true,
+          senderName: member.displayName,
+          senderCode: member.code,
+          senderRole: member.role,
+          deliveryState: "delivered",
+          deliveryContext: "group",
+          groupOrdered: true,
+        });
+      }
+      setStatus(t("group_message_committed"), "connected");
+    } else {
+      if (submitted) {
+        pendingGroupDrafts.delete(event.clientEventId);
+        updateMessageDelivery(submitted.message, "failed");
+      }
+      addMessage({
+        type: "text",
+        text: event.text,
+        mine,
+        senderName: member.displayName,
+        senderCode: member.code,
+        senderRole: member.role,
+        deliveryState: mine ? "delivered" : "",
+        deliveryContext: mine ? "group" : "",
+        groupOrdered: true,
+      });
+    }
+    return;
+  }
+  const member = event.member || groupMemberById(event.memberId);
+  const identity = groupMemberIdentity(member);
+  if (event.type === "MEMBER_JOINED" && event.member?.id !== groupRoom?.memberId) {
+    addMessage({ type: "system", text: format("group_system_joined", { identity }), groupOrdered: true });
+  } else if (event.type === "MEMBER_LEFT") {
+    addMessage({ type: "system", text: format("group_system_left", { identity }), groupOrdered: true });
+  }
+}
+
+function handleGroupStatus(code, detail = {}) {
+  if (code === "JOIN_CONNECTING") {
+    $("group-waiting-status").textContent = t("status_connecting");
+  } else if (code === "JOIN_PENDING") {
+    $("group-waiting-status").textContent = t("group_waiting_status");
+  } else if (code === "ADDRESS_VERIFYING") {
+    $("group-waiting-status").textContent = t("group_callback_verifying");
+  } else if (code === "RECOVERING" || code === "RECOVERY_RETRY") {
+    updatePendingGroupMessages("reconnecting");
+    $("group-room-status").textContent = t("group_status_reconnecting");
+    setStatus(t("group_status_reconnecting"), "loading");
+  } else if (code === "RECOVERED") {
+    updatePendingGroupMessages("sending");
+  } else if (code === "ACTION_REJECTED" && detail.requestId) {
+    failPendingGroupMessage(detail.requestId, detail.reason || "REJECTED");
+  } else if (code === "MESSAGE_GAP") {
+    addMessage({ type: "system", text: t("group_message_gap") });
+    setStatus(t("group_message_gap"), "error");
+  } else if (code === "ROOM_PAUSED") {
+    // Transfers already on the wire may finish, but queued recipients from an
+    // earlier generation must never start while/after this pause transition.
+    groupTransferGeneration += 1;
+    if (groupRoom?.roomId) {
+      groupRecipientTransferScheduler.cancelScope(groupRoom.roomId, "group room paused");
+    }
+    if (recorder || activeVoiceStream || voicePointerHeld) cancelActiveVoiceRecording();
+    setStatus(t("group_status_paused"), "loading");
+  } else if (code === "SLOW_MEMBER" && detail.memberId) {
+    renderGroupState(groupRoom.snapshot());
+  } else if (code === "MEMBER_TICKETS_REVOKED" && detail.memberId) {
+    cancelGroupTransferConnections(detail.memberId);
+  }
+}
+
+function cancelGroupTransferConnections(memberId = "") {
+  for (const entry of groupOutgoingTransfers) {
+    if (memberId) entry.invalidRecipients.add(memberId);
+    else entry.cancelled = true;
+  }
+  for (const entry of groupTransferConnections) {
+    if (memberId && entry.senderId !== memberId && entry.recipientId !== memberId) continue;
+    entry.cancelled = true;
+    entry.cancelDecision?.();
+    safeConnectionClose(entry.connection);
+  }
+  if (activeFileTransfer?.group
+    && (!memberId || activeFileTransfer.senderId === memberId || activeFileTransfer.recipientId === memberId)) {
+    activeFileTransfer.cancelled = true;
+    activeFileTransfer.cancelDecision?.();
+    safeConnectionClose(activeFileTransfer.connection);
+  }
+}
+
+function safeConnectionClose(connection) {
+  try { connection?.close(); } catch (_) {}
+}
+
+function handleGroupClosed(reason, { roomId = "" } = {}) {
+  clearTimeout(groupBackgroundCloseTimer);
+  groupBackgroundCloseTimer = null;
+  groupBackgroundedAt = 0;
+  groupWakeLockFailed = false;
+  groupTransferGeneration += 1;
+  if (roomId) groupRecipientTransferScheduler.cancelScope(roomId, "group room closed");
+  pendingGroupDrafts.clear();
+  cancelActiveVoiceRecording();
+  cancelGroupTransferConnections();
+  discardGroupTransferItems(roomId);
+  $("group-invite-link").textContent = "";
+  clearGroupInviteQR(roomId);
+  closeGroupListener();
+  tcTest.listenAddr = null;
+  tcTest.state.room = "closed";
+  void wakeLocks.release("group-host");
+  const key = reason === "REMOVED"
+    ? "group_member_removed"
+    : reason === "HOST_CLOSED" || reason === "BACKGROUND_TIMEOUT" || reason === "RECOVERY_TIMEOUT"
+      ? "group_host_left"
+      : "group_status_closed";
+  setStatus(t(key), "error");
+  clearMessageHistory();
+  renderGroupState(groupRoom.snapshot());
+  $("region-select").disabled = false;
+  $("persist-key").disabled = !persistenceAvailable;
+  $("listen-btn").disabled = !tcTest.ready;
+  $("connect-btn").disabled = !tcTest.ready;
+  setMobileState(restingMobileState());
+}
+
 function markActivity() {
-  if (!listener) return;
+  if (!listener || listenerMode === "group") return;
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => stopRoom({ idle: true }), APP_CONFIG.idleTimeoutMs);
 }
@@ -752,6 +1457,10 @@ function noteAuthenticatedPeerTraffic() {
 }
 
 function renderConnectionState() {
+  if (groupRoom?.active) {
+    renderGroupState(groupRoom.snapshot());
+    return;
+  }
   if (activeSession && activePeerAddress) {
     $("peer-label").textContent = t("connected_peer");
     setStatus(t("status_connected"), "connected");
@@ -876,6 +1585,23 @@ async function verifySessionAfterResume() {
 
 function notePageBackgrounded() {
   pageWasBackgrounded = true;
+  if (support.mobile && (recorder || activeVoiceStream || voicePointerHeld)) cancelActiveVoiceRecording();
+  if (support.mobile && groupRoom?.mode === "owner") {
+    if (!groupBackgroundedAt) groupBackgroundedAt = Date.now();
+    void groupRoom.setRoomPaused(true, "HOST_BACKGROUND");
+    clearTimeout(groupBackgroundCloseTimer);
+    const remaining = APP_CONFIG.group.reconnectGraceMs - (Date.now() - groupBackgroundedAt);
+    if (remaining <= 0) {
+      void groupRoom.close("BACKGROUND_TIMEOUT", { notify: true });
+    } else {
+      groupBackgroundCloseTimer = setTimeout(() => {
+        if (groupRoom?.mode === "owner" && groupBackgroundedAt) {
+          void groupRoom.close("BACKGROUND_TIMEOUT", { notify: true });
+        }
+      }, remaining);
+    }
+    $("background-risk").classList.remove("hidden");
+  }
   if (support.mobile && (activeSession || activeFileTransfer || recorder || peerConnection || handshakeWaiter)) {
     $("background-risk").classList.remove("hidden");
   }
@@ -885,6 +1611,19 @@ function resumeForegroundSession() {
   if (!pageWasBackgrounded) return;
   pageWasBackgrounded = false;
   void wakeLocks.request();
+  if (support.mobile && groupRoom?.mode === "owner" && groupBackgroundedAt) {
+    const elapsed = Date.now() - groupBackgroundedAt;
+    groupBackgroundedAt = 0;
+    clearTimeout(groupBackgroundCloseTimer);
+    groupBackgroundCloseTimer = null;
+    if (elapsed >= APP_CONFIG.group.reconnectGraceMs) {
+      void groupRoom.close("BACKGROUND_TIMEOUT", { notify: true });
+      return;
+    }
+    void groupRoom.setRoomPaused(false, "");
+    $("background-risk").classList.add("hidden");
+    return;
+  }
   if (activeSession) void verifySessionAfterResume();
   else $("background-risk").classList.add("hidden");
 }
@@ -893,9 +1632,11 @@ function clearPeer() {
   cancelActiveVoiceRecording();
   stopPeerHeartbeat();
   lastAuthenticatedPeerTrafficAt = 0;
+  if (activeSession) closePrivateTextQueue(activeSession);
   activePeerAddress = "";
   activePeerNonce = "";
   activeSession = "";
+  resetPrivateAutoReceiveBudget();
   peerCapabilities = null;
   if (handshakeWaiter) {
     settleHandshake(new Error("room closed"));
@@ -927,8 +1668,12 @@ async function loadRememberedKey() {
 async function startRoom() {
   if (!support.ok) throw new Error("unsupported browser");
   if (!APP_CONFIG.roomsEnabled) throw new Error(t("rooms_disabled"));
+  if (groupRoom?.active || listenerMode === "group") throw new Error(t("status_busy"));
   if (listener) return listener;
-  if (listenerStarting) return listenerStarting;
+  if (listenerStarting) {
+    if (listenerStartingMode === "private") return listenerStarting;
+    throw new Error(t("status_busy"));
+  }
   stoppedForIdle = false;
   $("listen-btn").disabled = true;
   $("region-select").disabled = true;
@@ -936,7 +1681,8 @@ async function startRoom() {
   setStatus(t("status_starting"), "loading");
   setMobileState("connecting");
   tcTest.state.room = "starting";
-  listenerStarting = (async () => {
+  listenerStartingMode = "private";
+  const starting = (async () => {
     let created = null;
     try {
       await refreshFileSinkSupport();
@@ -959,6 +1705,7 @@ async function startRoom() {
         onConnection: routeIncomingConnection,
       });
       listener = created;
+      listenerMode = "private";
       localAddress = created.addr;
       tcTest.listenAddr = created.addr;
       tcTest.state.room = "open";
@@ -966,6 +1713,7 @@ async function startRoom() {
       $("listen-info").classList.remove("hidden");
       $("listen-btn").classList.add("hidden");
       $("stop-listen-btn").classList.remove("hidden");
+      $("group-create-entry").classList.add("hidden");
       $("region-select").value = regionByCode(created.regionCode || requestedRegion.code).code;
       if (remember) {
         try {
@@ -989,6 +1737,7 @@ async function startRoom() {
     } catch (error) {
       created?.close();
       listener = null;
+      listenerMode = "none";
       localAddress = "";
       tcTest.listenAddr = null;
       tcTest.state.room = "closed";
@@ -1004,13 +1753,203 @@ async function startRoom() {
       recordError(error);
       throw error;
     } finally {
-      listenerStarting = null;
+      if (listenerStarting === starting) {
+        listenerStarting = null;
+        listenerStartingMode = "none";
+      }
     }
   })();
+  listenerStarting = starting;
   return listenerStarting;
 }
 
+function showGroupDialogError(id, message) {
+  const element = $(id);
+  element.textContent = message;
+  element.classList.toggle("hidden", !message);
+}
+
+async function startGroupListener() {
+  if (!support.ok || !groupFeatureAvailable()) throw new Error(t("group_rooms_disabled"));
+  if (listener || listenerStarting || activeSession) throw new Error(t("status_busy"));
+  listenerStartingMode = "group";
+  const starting = (async () => {
+    let created = null;
+    try {
+      await refreshFileSinkSupport();
+      const requestedRegion = regionByCode($("region-select").value);
+      created = await tailcatListen({
+        derpMapURL: APP_CONFIG.derpMapURL,
+        privateKey: "",
+        regionID: requestedRegion.id,
+        onConnection: routeIncomingConnection,
+      });
+      listener = created;
+      listenerMode = "group";
+      localAddress = created.addr;
+      // Group diagnostics expose counts only; never copy the ephemeral address.
+      tcTest.listenAddr = null;
+      tcTest.state.room = "open";
+      $("region-select").value = regionByCode(created.regionCode || requestedRegion.code).code;
+      return created;
+    } catch (error) {
+      created?.close();
+      listener = null;
+      listenerMode = "none";
+      localAddress = "";
+      tcTest.listenAddr = null;
+      tcTest.state.room = "closed";
+      throw error;
+    } finally {
+      if (listenerStarting === starting) {
+        listenerStarting = null;
+        listenerStartingMode = "none";
+      }
+    }
+  })();
+  listenerStarting = starting;
+  return listenerStarting;
+}
+
+function closeGroupListener(expected = null) {
+  if (listenerMode !== "group" || !listener || (expected && listener !== expected)) return false;
+  listener.close();
+  listener = null;
+  listenerMode = "none";
+  localAddress = "";
+  tcTest.listenAddr = null;
+  tcTest.state.room = "closed";
+  return true;
+}
+
+async function createGroupRoom() {
+  showGroupDialogError("group-create-status", "");
+  groupWakeLockFailed = false;
+  $("group-wake-lock-alert").classList.add("hidden");
+  if (!groupFeatureAvailable()) {
+    showGroupDialogError("group-create-status", t("group_rooms_disabled"));
+    return false;
+  }
+  if (support.mobile && !APP_CONFIG.mobileGroupHostingEnabled) {
+    showGroupDialogError("group-create-status", t("group_mobile_hosting_disabled"));
+    return false;
+  }
+  if (support.mobile && !$("group-mobile-host-confirm").checked) {
+    showGroupDialogError("group-create-status", t("group_mobile_host_required"));
+    return false;
+  }
+  let displayName;
+  try {
+    displayName = normalizeGroupDisplayName($("group-create-nickname").value);
+  } catch (_) {
+    showGroupDialogError("group-create-status", t("group_nickname_invalid"));
+    return false;
+  }
+  $("group-create-btn").disabled = true;
+  setStatus(t("group_status_starting"), "loading");
+  const operation = ++groupCreateOperation;
+  let ownedListener = null;
+  try {
+    ownedListener = await startGroupListener();
+    if (operation !== groupCreateOperation || !$("group-create-dialog").open) {
+      closeGroupListener(ownedListener);
+      return false;
+    }
+    ensureGroupRoom().startOwner({ address: localAddress, displayName });
+    $("group-create-dialog").close();
+    clearMessageHistory();
+    addMessage({ type: "system", text: t("group_status_active") });
+    if (support.mobile && document.visibilityState !== "visible") notePageBackgrounded();
+    const wakeHeld = await wakeLocks.acquire("group-host");
+    if (support.mobile && document.visibilityState === "visible" && !wakeHeld) {
+      groupWakeLockFailed = true;
+      $("group-wake-lock-alert").classList.remove("hidden");
+      setStatus(t("group_wake_lock_failed"), "error");
+    }
+    return true;
+  } catch (error) {
+    if (groupRoom?.active) await groupRoom.close("CREATE_FAILED", { notify: false });
+    else closeGroupListener(ownedListener);
+    showGroupDialogError("group-create-status", format("generic_error", { message: redact(error.message) }));
+    recordGroupError(error);
+    return false;
+  } finally {
+    $("group-create-btn").disabled = false;
+  }
+}
+
+function groupJoinErrorKey(error) {
+  const message = String(error?.message || error);
+  if (message.includes("FULL")) return "group_room_full";
+  if (message.includes("EXPIRED")) return "group_request_expired";
+  if (message.includes("REJECTED")) return "group_request_rejected";
+  if (message.includes("PAUSED")) return "group_joins_paused";
+  if (message.includes("CANCELLED") || message.includes("cancelled")) return "group_request_cancelled";
+  if (message.includes("INVITE")) return "group_invite_invalid";
+  return "group_invite_invalid";
+}
+
+async function requestGroupJoin() {
+  showGroupDialogError("group-join-status", "");
+  if (!groupFeatureAvailable() || !pendingGroupInvite) {
+    showGroupDialogError("group-join-status", t("group_rooms_disabled"));
+    return false;
+  }
+  let displayName;
+  try {
+    displayName = normalizeGroupDisplayName($("group-join-nickname").value);
+  } catch (_) {
+    showGroupDialogError("group-join-status", t("group_nickname_invalid"));
+    return false;
+  }
+  const invite = pendingGroupInvite;
+  $("group-join-btn").disabled = true;
+  const operation = ++groupJoinOperation;
+  let ownedListener = null;
+  try {
+    ownedListener = await startGroupListener();
+    if (operation !== groupJoinOperation || !$("group-join-dialog").open) {
+      closeGroupListener(ownedListener);
+      return false;
+    }
+    pendingGroupInvite = null;
+    $("group-join-dialog").close();
+    const joined = ensureGroupRoom().requestJoin({ invite, address: localAddress, displayName });
+    renderGroupState(groupRoom.snapshot());
+    await joined;
+    clearMessageHistory();
+    addMessage({ type: "system", text: t("group_status_active") });
+    return true;
+  } catch (error) {
+    const key = groupJoinErrorKey(error);
+    if (groupRoom?.active) await groupRoom.close(key, { notify: false });
+    else closeGroupListener(ownedListener);
+    setStatus(t(key), "error");
+    recordGroupError(error);
+    return false;
+  } finally {
+    $("group-join-btn").disabled = false;
+  }
+}
+
+function presentGroupInvitation(invite) {
+  pendingGroupInvite = invite;
+  if (!groupFeatureAvailable()) {
+    setStatus(t("group_rooms_disabled"), "error");
+    return;
+  }
+  showGroupDialogError("group-join-status", "");
+  $("group-join-nickname").value = "";
+  $("group-join-btn").disabled = true;
+  $("group-join-dialog").showModal();
+  $("group-join-nickname").focus();
+}
+
 async function stopRoom({ idle = false } = {}) {
+  if (groupRoom?.active) {
+    await groupRoom.close(idle ? "IDLE" : "HOST_CLOSED", { notify: true });
+    return;
+  }
   stoppedForIdle = idle;
   clearTimeout(idleTimer);
   idleTimer = null;
@@ -1023,6 +1962,7 @@ async function stopRoom({ idle = false } = {}) {
   listener?.close();
   listener = null;
   listenerStarting = null;
+  listenerMode = "none";
   localAddress = "";
   tcTest.listenAddr = null;
   tcTest.state.room = "closed";
@@ -1031,6 +1971,7 @@ async function stopRoom({ idle = false } = {}) {
   $("listen-btn").classList.remove("hidden");
   $("listen-btn").disabled = !tcTest.ready;
   $("stop-listen-btn").classList.add("hidden");
+  $("group-create-entry").classList.toggle("hidden", !tcTest.ready || !groupFeatureAvailable());
   $("region-select").disabled = false;
   $("persist-key").disabled = !persistenceAvailable;
   clearPeer();
@@ -1041,6 +1982,7 @@ async function stopRoom({ idle = false } = {}) {
 function setPeerConnected(address, session, capabilities, nonce = "") {
   activePeerAddress = address;
   activeSession = session;
+  resetPrivateAutoReceiveBudget(session);
   activePeerNonce = nonce;
   peerCapabilities = validCapabilities(capabilities);
   lastAuthenticatedPeerTrafficAt = Date.now();
@@ -1205,6 +2147,7 @@ function routeIncomingConnection(connection) {
     [APP_CONFIG.ports.text, { handler: receiveText, limit: 8 }],
     [APP_CONFIG.ports.file, { handler: receiveFile, limit: 2 }],
     [APP_CONFIG.ports.voice, { handler: receiveVoice, limit: 2 }],
+    [APP_CONFIG.ports.group, { handler: receiveGroupConnection, limit: 32 }],
   ]);
   const route = routes.get(connection.port);
   if (!route) {
@@ -1217,11 +2160,22 @@ function routeIncomingConnection(connection) {
     return;
   }
   inboundConnectionCounts.set(connection.port, count + 1);
-  void route.handler(connection).catch(recordError).finally(() => {
+  void route.handler(connection).catch((error) => {
+    if (connection.port === APP_CONFIG.ports.group) recordGroupError(error);
+    else recordError(error);
+  }).finally(() => {
     const remaining = (inboundConnectionCounts.get(connection.port) || 1) - 1;
     if (remaining > 0) inboundConnectionCounts.set(connection.port, remaining);
     else inboundConnectionCounts.delete(connection.port);
   });
+}
+
+async function receiveGroupConnection(connection) {
+  if (!groupFeatureAvailable() || !groupRoom?.active || listenerMode !== "group") {
+    connection.close();
+    return;
+  }
+  await groupRoom.handleIncoming(connection);
 }
 
 async function receiveControl(connection) {
@@ -1289,6 +2243,15 @@ async function receiveHello(meta) {
   const replyTo = meta?.replyTo;
   const nonce = meta?.nonce;
   if (!validAddress(replyTo) || typeof nonce !== "string" || nonce.length !== 32) return;
+  if (groupRoom?.active || listenerMode === "group") {
+    await sendHandshakeReply(replyTo, {
+      type: "HELLO_REJECT",
+      v: APP_CONFIG.protocolVersion,
+      nonce,
+      reason: "GROUP_PROTOCOL_REQUIRED",
+    }).catch(recordGroupError);
+    return;
+  }
   if (meta.v !== APP_CONFIG.protocolVersion) {
     await sendHandshakeReply(replyTo, { type: "HELLO_REJECT", v: APP_CONFIG.protocolVersion, nonce, reason: "PROTOCOL" }).catch(recordError);
     return;
@@ -1441,7 +2404,9 @@ async function receiveHelloAck(meta) {
 
 function receiveHelloReject(meta) {
   if (!handshakeWaiter || meta.nonce !== pendingHandshakeNonce || meta.nonce !== handshakeWaiter.nonce) return;
-  const key = meta.reason === "BUSY" ? "status_busy" : "status_protocol";
+  const key = meta.reason === "BUSY"
+    ? "status_busy"
+    : (meta.reason === "GROUP_PROTOCOL_REQUIRED" ? "group_protocol_required" : "status_protocol");
   const error = new Error(t(key));
   settleHandshake(error);
   setStatus(t(key), "error");
@@ -1451,10 +2416,185 @@ function receiveHelloReject(meta) {
 
 const renderedMessages = [];
 let renderedMessageBytes = 0;
+let renderedMessageOrdinal = 0;
+const pendingGroupDrafts = new Map();
+const privateTextQueues = new Map();
+let sendButtonFeedbackTimer = null;
 
-async function sendText() {
+function privateTextQueueFor(session, peerAddress) {
+  let queue = privateTextQueues.get(session);
+  if (queue && queue.peerAddress !== peerAddress) {
+    closePrivateTextQueue(session);
+    queue = null;
+  }
+  if (!queue) {
+    queue = {
+      session,
+      peerAddress,
+      tail: Promise.resolve(),
+      frames: 0,
+      bytes: 0,
+      pending: new Set(),
+      closed: false,
+    };
+    privateTextQueues.set(session, queue);
+  }
+  return queue;
+}
+
+function closePrivateTextQueue(session) {
+  const queue = privateTextQueues.get(session);
+  if (!queue) return;
+  queue.closed = true;
+  for (const message of queue.pending) updateMessageDelivery(message, "failed");
+  if (queue.frames === 0) privateTextQueues.delete(session);
+}
+
+function clearSubmittedText() {
+  const input = $("send-text");
+  input.value = "";
+  try {
+    input.focus({ preventScroll: true });
+  } catch (_) {
+    input.focus();
+  }
+}
+
+function showQueuedSendFeedback() {
+  const button = $("send-text-btn");
+  button.classList.add("queued");
+  button.dataset.feedback = "queued";
+  clearTimeout(sendButtonFeedbackTimer);
+  sendButtonFeedbackTimer = setTimeout(() => {
+    button.classList.remove("queued");
+    delete button.dataset.feedback;
+  }, 600);
+}
+
+function deliveryStatusKey(state, context) {
+  if (state === "sending") return "message_pending";
+  if (state === "reconnecting") return "message_retrying";
+  if (state === "failed") return "message_send_failed";
+  if (state === "delivered") return context === "group" ? "group_message_committed" : "message_delivered";
+  return "";
+}
+
+function isRenderedMessage(message) {
+  return Boolean(message && renderedMessages.includes(message) && message.article?.isConnected);
+}
+
+function insertRenderedMessage(message) {
+  const history = $("history");
+  if (message.groupOrdered && !message.localOnly) {
+    const localIndex = renderedMessages.findIndex((candidate) => candidate.localOnly);
+    if (localIndex >= 0) {
+      history.insertBefore(message.article, renderedMessages[localIndex].article);
+      renderedMessages.splice(localIndex, 0, message);
+      return;
+    }
+  }
+  history.append(message.article);
+  renderedMessages.push(message);
+}
+
+function moveMessageToCommittedTail(message) {
+  const currentIndex = renderedMessages.indexOf(message);
+  if (currentIndex < 0) return;
+  renderedMessages.splice(currentIndex, 1);
+  const localIndex = renderedMessages.findIndex((candidate) => candidate.localOnly);
+  if (localIndex >= 0) {
+    $("history").insertBefore(message.article, renderedMessages[localIndex].article);
+    renderedMessages.splice(localIndex, 0, message);
+    return;
+  }
+  $("history").append(message.article);
+  renderedMessages.push(message);
+}
+
+function updateMessageDelivery(message, state) {
+  if (!isRenderedMessage(message)) return false;
+  message.deliveryState = state;
+  message.localOnly = message.deliveryContext === "group"
+    && (state === "sending" || state === "reconnecting");
+  message.article.dataset.deliveryState = state;
+  if (state === "sending" || state === "reconnecting") {
+    message.article.setAttribute("aria-busy", "true");
+  } else {
+    message.article.removeAttribute("aria-busy");
+  }
+  const key = deliveryStatusKey(state, message.deliveryContext);
+  if (message.delivery && key) {
+    message.delivery.dataset.i18n = key;
+    message.delivery.textContent = t(key);
+  }
+  if (state === "delivered" && message.deliveryContext === "group") {
+    message.renderOrdinal = ++renderedMessageOrdinal;
+    moveMessageToCommittedTail(message);
+  }
+  return true;
+}
+
+function updatePendingGroupMessages(state) {
+  const roomId = groupRoom?.roomId;
+  for (const draft of pendingGroupDrafts.values()) {
+    if (draft.roomId === roomId) updateMessageDelivery(draft.message, state);
+  }
+}
+
+function failPendingGroupMessage(clientEventId, reason) {
+  const draft = pendingGroupDrafts.get(clientEventId);
+  if (!draft || draft.roomId !== groupRoom?.roomId) return;
+  pendingGroupDrafts.delete(clientEventId);
+  updateMessageDelivery(draft.message, "failed");
+  setStatus(format("message_send_failed_status", { message: redact(reason) }), "error");
+}
+
+function sendText() {
   const text = $("send-text").value;
   if (!text.trim()) return;
+  if (groupRoom?.active) {
+    if (!groupRoom.canSend) {
+      setStatus(t("group_status_paused"), "error");
+      return;
+    }
+    const payload = encoder.encode(text);
+    if (payload.length > APP_CONFIG.limits.textBytes) {
+      setStatus(t("message_too_large"), "error");
+      return;
+    }
+    const controller = groupRoom;
+    const member = groupMemberById(controller.memberId);
+    const roomId = controller.roomId;
+    const clientEventId = randomBase64URL(16);
+    const message = addMessage({
+      type: "text",
+      text,
+      mine: true,
+      senderName: member?.displayName,
+      senderCode: member?.code,
+      senderRole: member?.role,
+      deliveryState: "sending",
+      deliveryContext: "group",
+      groupOrdered: true,
+    });
+    pendingGroupDrafts.set(clientEventId, { roomId, text, message });
+    clearSubmittedText();
+    showQueuedSendFeedback();
+    setStatus(t("group_message_sending"), "loading");
+    void controller.sendText(text, clientEventId).then((result) => {
+      const submitted = pendingGroupDrafts.get(clientEventId);
+      if (submitted?.roomId !== roomId) return;
+      if (result?.recovering) updateMessageDelivery(submitted.message, "reconnecting");
+    }, (error) => {
+      const submitted = pendingGroupDrafts.get(clientEventId);
+      if (submitted?.roomId !== roomId) return;
+      pendingGroupDrafts.delete(clientEventId);
+      updateMessageDelivery(submitted.message, "failed");
+      setStatus(format("message_send_failed_status", { message: redact(error.message) }), "error");
+      recordGroupError(error);
+    });
+    return;
+  }
   if (!activeSession || !activePeerAddress) {
     setStatus(t("need_peer"), "error");
     return;
@@ -1464,31 +2604,67 @@ async function sendText() {
     setStatus(t("message_too_large"), "error");
     return;
   }
-  $("send-text-btn").disabled = true;
-  setStatus(t("message_sending"), "loading");
-  try {
-    const messageId = randomID();
-    const response = await sendChatEnvelopeTo(
-      activePeerAddress,
-      sessionMeta("TEXT", { messageId }),
-      payload,
-      APP_CONFIG.ports.text,
-    );
-    const ack = unpackChatEnvelope(response);
-    if (ack.payload.length
-      || ack.meta.type !== "TEXT_ACK"
-      || !hasSession(ack.meta)
-      || ack.meta.messageId !== messageId) throw new Error("text acknowledgement rejected");
-    addMessage({ type: "text", text, mine: true });
-    $("send-text").value = "";
-    setStatus(t("message_delivered"), "connected");
-    noteAuthenticatedPeerTraffic();
-  } catch (error) {
-    setStatus(format("status_failed", { message: redact(error.message) }), "error");
-    recordError(error);
-  } finally {
-    $("send-text-btn").disabled = !activeSession;
+  const session = activeSession;
+  const peerAddress = activePeerAddress;
+  const queue = privateTextQueueFor(session, peerAddress);
+  if (queue.frames + 1 > APP_CONFIG.group.sendQueueMaxFrames
+    || queue.bytes + payload.length > APP_CONFIG.group.sendQueueMaxBytes) {
+    setStatus(t("message_queue_full"), "error");
+    return;
   }
+  const messageId = randomID();
+  const message = addMessage({
+    type: "text",
+    text,
+    mine: true,
+    deliveryState: "sending",
+    deliveryContext: "private",
+  });
+  queue.frames += 1;
+  queue.bytes += payload.length;
+  queue.pending.add(message);
+  clearSubmittedText();
+  showQueuedSendFeedback();
+  setStatus(t("message_sending"), "loading");
+  const send = async () => {
+    try {
+      if (queue.closed || activeSession !== session || activePeerAddress !== peerAddress) {
+        throw new Error("the room changed before this message could be sent");
+      }
+      setStatus(t("message_sending"), "loading");
+      const response = await sendChatEnvelopeTo(
+        peerAddress,
+        { type: "TEXT", session, messageId },
+        payload,
+        APP_CONFIG.ports.text,
+      );
+      const ack = unpackChatEnvelope(response);
+      if (ack.payload.length
+        || ack.meta.type !== "TEXT_ACK"
+        || !sessionMatches(ack.meta, session)
+        || ack.meta.messageId !== messageId) throw new Error("text acknowledgement rejected");
+      updateMessageDelivery(message, "delivered");
+      if (activeSession === session && activePeerAddress === peerAddress) {
+        setStatus(t("message_delivered"), "connected");
+        noteAuthenticatedPeerTraffic();
+      }
+    } catch (error) {
+      const cancelledWithRoom = queue.closed
+        && (activeSession !== session || activePeerAddress !== peerAddress);
+      updateMessageDelivery(message, "failed");
+      if (activeSession === session && activePeerAddress === peerAddress) {
+        setStatus(format("message_send_failed_status", { message: redact(error.message) }), "error");
+      }
+      if (!cancelledWithRoom) recordError(error);
+    } finally {
+      queue.pending.delete(message);
+      queue.frames = Math.max(0, queue.frames - 1);
+      queue.bytes = Math.max(0, queue.bytes - payload.length);
+      if (queue.frames === 0 && privateTextQueues.get(session) === queue) privateTextQueues.delete(session);
+    }
+  };
+  const queued = queue.tail.then(send, send);
+  queue.tail = queued.catch(() => {});
 }
 
 async function receiveText(connection) {
@@ -1552,16 +2728,52 @@ function addMessage(item) {
   } else {
     const meta = document.createElement("div");
     meta.className = "message-meta";
-    const who = item.mine ? t("you") : t("peer");
+    const who = item.senderName
+      ? groupMemberIdentity({ displayName: item.senderName, code: item.senderCode, role: item.senderRole })
+      : item.mine ? t("you") : t("peer");
     meta.textContent = `${who} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    if (item.mine && item.deliveryState) {
+      const delivery = document.createElement("span");
+      const key = deliveryStatusKey(item.deliveryState, item.deliveryContext);
+      delivery.className = "message-delivery-status";
+      delivery.dataset.i18n = key;
+      delivery.textContent = t(key);
+      meta.append(document.createTextNode(" · "), delivery);
+    }
     article.append(meta, bubble);
   }
-  $("history").append(article);
-  renderedMessages.push({ article, objectURL, retainedBytes });
+  const delivery = article.querySelector(".message-delivery-status");
+  const message = {
+    article,
+    bubble,
+    delivery,
+    deliveryContext: item.deliveryContext || "",
+    deliveryState: item.deliveryState || "",
+    groupOrdered: Boolean(item.groupOrdered),
+    renderOrdinal: ++renderedMessageOrdinal,
+    localOnly: Boolean(
+      item.deliveryContext === "group"
+      && item.mine
+      && (item.deliveryState === "sending" || item.deliveryState === "reconnecting"),
+    ),
+    objectURL,
+    retainedBytes,
+  };
+  if (item.deliveryState) {
+    article.dataset.deliveryState = item.deliveryState;
+    if (item.deliveryState === "sending" || item.deliveryState === "reconnecting") {
+      article.setAttribute("aria-busy", "true");
+    }
+  }
+  insertRenderedMessage(message);
   renderedMessageBytes += retainedBytes;
   while (renderedMessages.length > MESSAGE_HISTORY_MAX_ITEMS
     || renderedMessageBytes > MESSAGE_HISTORY_MAX_BYTES) {
-    const expired = renderedMessages.shift();
+    let oldestIndex = 0;
+    for (let index = 1; index < renderedMessages.length; index += 1) {
+      if (renderedMessages[index].renderOrdinal < renderedMessages[oldestIndex].renderOrdinal) oldestIndex = index;
+    }
+    const [expired] = renderedMessages.splice(oldestIndex, 1);
     if (!expired) break;
     renderedMessageBytes -= expired.retainedBytes;
     for (const media of expired.article.querySelectorAll("audio, video")) {
@@ -1573,6 +2785,7 @@ function addMessage(item) {
     expired.article.remove();
   }
   article.scrollIntoView({ block: "end" });
+  return message;
 }
 
 addEventListener("pagehide", (event) => {
@@ -1584,7 +2797,62 @@ addEventListener("pagehide", (event) => {
   }
 });
 
+function clearMessageHistory() {
+  for (const message of renderedMessages) {
+    for (const media of message.article.querySelectorAll("audio, video")) {
+      media.pause();
+      media.removeAttribute("src");
+      media.load();
+    }
+    if (message.objectURL) URL.revokeObjectURL(message.objectURL);
+    message.article.remove();
+  }
+  renderedMessages.length = 0;
+  renderedMessageBytes = 0;
+  renderedMessageOrdinal = 0;
+}
+
 // ---- TCF1 streaming file protocol --------------------------------------
+
+function fileWireMeta(context, type, extra = {}) {
+  if (context.mode === "group") {
+    return {
+      type,
+      v: APP_CONFIG.protocolVersion,
+      mode: "group",
+      gv: GROUP_PROTOCOL_VERSION,
+      roomId: context.roomId,
+      senderId: context.senderId,
+      recipientId: context.recipientId,
+      transferId: context.transferId,
+      ...extra,
+    };
+  }
+  return {
+    type,
+    v: APP_CONFIG.protocolVersion,
+    session: context.session,
+    transferId: context.transferId,
+    ...extra,
+  };
+}
+
+function fileWireMatches(meta, context) {
+  if (context.mode === "group") {
+    return meta?.v === APP_CONFIG.protocolVersion
+      && meta.mode === "group"
+      && meta.gv === GROUP_PROTOCOL_VERSION
+      && meta.roomId === context.roomId
+      && meta.senderId === context.senderId
+      && meta.recipientId === context.recipientId
+      && meta.transferId === context.transferId;
+  }
+  return sessionMatches(meta, context.session) && meta.transferId === context.transferId;
+}
+
+function noteFileTraffic(context) {
+  if (context.mode !== "group") noteAuthenticatedPeerTraffic();
+}
 
 let activeFileTransfer = null;
 const outgoingFileQueue = [];
@@ -1607,6 +2875,41 @@ function renderTransferCount() {
   $("transfer-tray").classList.toggle("hidden", count === 0);
 }
 
+function removeFinishedTransferReference(item) {
+  for (let index = finishedTransferItems.length - 1; index >= 0; index -= 1) {
+    if (finishedTransferItems[index] === item) finishedTransferItems.splice(index, 1);
+  }
+}
+
+function markGroupTransferItem(ui, roomId) {
+  if (!ui?.item || typeof roomId !== "string" || !roomId) return ui;
+  groupTransferRooms.set(ui.item, roomId);
+  groupTransferItems.add(ui.item);
+  return ui;
+}
+
+function discardGroupTransferItem(item) {
+  if (!item || stagedTransferItems.has(item)) return false;
+  item.dataset.discarded = "true";
+  for (const control of item.querySelectorAll("button")) {
+    control.onclick = null;
+    control.disabled = true;
+  }
+  removeFinishedTransferReference(item);
+  transferItemCleanups.delete(item);
+  groupTransferItems.delete(item);
+  item.remove();
+  return true;
+}
+
+function discardGroupTransferItems(roomId = "") {
+  for (const item of [...groupTransferItems]) {
+    if (roomId && groupTransferRooms.get(item) !== roomId) continue;
+    discardGroupTransferItem(item);
+  }
+  renderTransferCount();
+}
+
 function pruneFinishedTransferItems() {
   let removableCount = finishedTransferItems.reduce(
     (count, item) => count + (stagedTransferItems.has(item) ? 0 : 1),
@@ -1619,6 +2922,7 @@ function pruneFinishedTransferItems() {
     const cleanup = transferItemCleanups.get(removed);
     if (cleanup) void cleanup().catch(recordError);
     transferItemCleanups.delete(removed);
+    groupTransferItems.delete(removed);
     removed?.remove();
     removableCount -= 1;
     if (!activeSession) setMobileState(restingMobileState());
@@ -1627,6 +2931,10 @@ function pruneFinishedTransferItems() {
 
 function finishTransferItem(ui) {
   if (!ui?.item || ui.item.dataset.finished === "true") return;
+  if (ui.item.dataset.discarded === "true" && !stagedTransferItems.has(ui.item)) {
+    groupTransferItems.delete(ui.item);
+    return;
+  }
   ui.item.dataset.finished = "true";
   for (const control of [ui.cancel, ui.save, ui.reject]) {
     if (!control) continue;
@@ -1653,6 +2961,8 @@ function createOutgoingTransferItem(file) {
   const progress = document.createElement("progress");
   progress.max = 1;
   progress.value = 0;
+  progress.setAttribute("aria-label", t("transfer_progress"));
+  progress.dataset.i18nTitle = "transfer_progress";
   copy.append(name, detail, progress);
   const cancel = document.createElement("button");
   cancel.className = "button small danger";
@@ -1664,7 +2974,441 @@ function createOutgoingTransferItem(file) {
   return { item, detail, progress, cancel };
 }
 
+function createKeyedTransferScheduler(maximum, maximumPending = MAX_PENDING_FILES) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error("invalid transfer scheduler limit");
+  if (!Number.isSafeInteger(maximumPending) || maximumPending < maximum) {
+    throw new Error("invalid transfer scheduler queue limit");
+  }
+  const lanes = new Map();
+  const ready = [];
+  let active = 0;
+  let pending = 0;
+
+  const pump = () => {
+    while (active < maximum && ready.length) {
+      const key = ready.shift();
+      const lane = lanes.get(key);
+      if (!lane || lane.active || !lane.queue.length) continue;
+      lane.active = true;
+      active += 1;
+      void (async () => {
+        try {
+          while (lane.queue.length) {
+            const task = lane.queue.shift();
+            try {
+              task.resolve(await task.operation());
+            } catch (error) {
+              task.reject(error);
+            } finally {
+              lane.pending = Math.max(0, lane.pending - 1);
+              pending = Math.max(0, pending - 1);
+            }
+          }
+        } finally {
+          lane.active = false;
+          active = Math.max(0, active - 1);
+          if (lane.queue.length) ready.push(key);
+          else if (lanes.get(key) === lane) lanes.delete(key);
+          pump();
+        }
+      })();
+    }
+  };
+
+  return Object.freeze({
+    enqueue(key, scope, operation) {
+      if (typeof key !== "string" || !key || typeof scope !== "string" || !scope || typeof operation !== "function") {
+        return Promise.reject(new Error("invalid transfer scheduler task"));
+      }
+      if (pending >= maximumPending) return Promise.reject(new Error("group transfer queue is full"));
+      let lane = lanes.get(key);
+      if (!lane) {
+        lane = { active: false, pending: 0, queue: [], scope };
+        lanes.set(key, lane);
+        ready.push(key);
+      }
+      if (lane.scope !== scope || lane.pending >= maximumPending) {
+        return Promise.reject(new Error("group recipient transfer queue is full"));
+      }
+      pending += 1;
+      lane.pending += 1;
+      const result = new Promise((resolve, reject) => lane.queue.push({ operation, resolve, reject }));
+      pump();
+      return result;
+    },
+    cancelScope(scope, reason = "group transfer queue cancelled") {
+      const error = new Error(reason);
+      for (const [key, lane] of lanes) {
+        if (lane.scope !== scope || !lane.queue.length) continue;
+        const queued = lane.queue.splice(0);
+        lane.pending = Math.max(0, lane.pending - queued.length);
+        pending = Math.max(0, pending - queued.length);
+        for (const task of queued) task.reject(error);
+        if (!lane.active && lanes.get(key) === lane) lanes.delete(key);
+      }
+      pump();
+    },
+    snapshot: () => Object.freeze({
+      active,
+      pending,
+      lanes: lanes.size,
+      queued: [...lanes.values()].reduce((sum, lane) => sum + lane.queue.length, 0),
+    }),
+  });
+}
+
+const groupRecipientTransferScheduler = createKeyedTransferScheduler(APP_CONFIG.group.maxParallelRecipients);
+
+function scheduleGroupRecipientTransfer(roomId, recipientId, operation) {
+  return groupRecipientTransferScheduler.enqueue(`${roomId}:${recipientId}`, roomId, operation);
+}
+
+function groupTransferRoomIsCurrent(roomId) {
+  return Boolean(roomId && groupRoom?.active && groupRoom.roomId === roomId);
+}
+
+function groupInboundTransferIsCurrent(controller, epoch, context, generation) {
+  if (!controller
+    || groupRoom !== controller
+    || controller.lifecycleEpoch !== epoch
+    || groupTransferGeneration !== generation
+    || !controller.active
+    || controller.roomId !== context?.roomId
+    || controller.memberId !== context?.recipientId) return false;
+  const members = controller.snapshot().members;
+  return members.some((member) => member.id === context.senderId && member.status === "online")
+    && members.some((member) => member.id === context.recipientId && member.status === "online");
+}
+
+function assertGroupTransferMayStart(entry, recipientId) {
+  if (entry.cancelled) throw new Error(t("file_cancelled"));
+  if (entry.generation !== groupTransferGeneration
+    || !groupTransferRoomIsCurrent(entry.roomId)
+    || !groupRoom?.canSend) {
+    throw new Error(t("group_status_paused"));
+  }
+  if (entry.invalidRecipients.has(recipientId)) throw new Error(t("group_member_removed"));
+  const recipient = groupMemberById(recipientId);
+  if (!recipient || recipient.status !== "online") throw new Error(t("group_recipient_unavailable"));
+}
+
+function assertGroupTransferControllerCurrent(controller, epoch, entry, recipientId) {
+  if (!controller || groupRoom !== controller || controller.lifecycleEpoch !== epoch) {
+    throw new Error(t("group_status_closed"));
+  }
+  assertGroupTransferMayStart(entry, recipientId);
+}
+
+function createGroupOutgoingTransferItem(file, recipients) {
+  const ui = createOutgoingTransferItem(file);
+  const statuses = new Map();
+  const list = document.createElement("ol");
+  list.className = "group-transfer-recipient-list";
+  for (const member of recipients) {
+    const fragment = $("group-transfer-status-template").content.cloneNode(true);
+    i18n.apply(fragment);
+    const item = fragment.querySelector(".group-transfer-recipient");
+    fragment.querySelector(".group-transfer-recipient-name").textContent = member.displayName;
+    fragment.querySelector(".group-transfer-recipient-code").textContent = `#${member.code}`;
+    const output = fragment.querySelector(".group-transfer-recipient-status");
+    statuses.set(member.id, { item, output });
+    list.append(fragment);
+  }
+  ui.item.querySelector(".transfer-copy")?.append(list);
+  return markGroupTransferItem({ ...ui, statuses }, groupRoom?.roomId);
+}
+
+function setGroupTransferRecipientStatus(entry, recipientId, key, state) {
+  const status = entry.ui.statuses.get(recipientId);
+  if (!status) return;
+  status.item.dataset.status = state;
+  status.output.dataset.i18n = key;
+  status.output.textContent = t(key);
+}
+
+function summarizeGroupTransfer(entry, successKey) {
+  const states = [...entry.ui.statuses.values()].map(({ item }) => item.dataset.status);
+  const complete = states.filter((state) => state === "complete").length;
+  const total = states.length;
+  if (entry.cancelled) return { complete, total, message: t(successKey === "file_sent" ? "file_cancelled" : "voice_discarded"), ok: false };
+  if (total > 0 && complete === total) return { complete, total, message: t(successKey), ok: true };
+  if (complete > 0) return { complete, total, message: format("group_transfer_partial", { complete, total }), ok: false };
+  return { complete, total, message: t("group_transfer_none_complete"), ok: false };
+}
+
+function enqueueGroupFiles(files) {
+  if (!groupRoom?.canSend) {
+    setStatus(t("group_status_paused"), "error");
+    return;
+  }
+  const recipientIds = selectedGroupRecipientIds();
+  if (!recipientIds.length) {
+    setStatus(t("group_no_recipients"), "error");
+    return;
+  }
+  const requested = Array.from(files);
+  const available = Math.max(0, MAX_PENDING_FILES - groupOutgoingTransfers.size);
+  const selected = requested.slice(0, available);
+  if (selected.length < requested.length) setStatus(t("file_queue_limit"), "error");
+  if (!selected.length) return;
+  const validFiles = selected.filter((file) => {
+    if (validFileSize(file.size)) return true;
+    setStatus(format("file_too_large", { name: sanitizeFileName(file.name) }), "error");
+    return false;
+  });
+  try {
+    groupBatchBytes(validFiles, recipientIds.length, APP_CONFIG.group.maxBatchBytes);
+  } catch (_) {
+    setStatus(t("group_batch_too_large"), "error");
+    return;
+  }
+  const snapshot = groupRoom.snapshot();
+  const recipients = snapshot.members.filter((member) => recipientIds.includes(member.id));
+  if (recipients.length !== recipientIds.length) {
+    setStatus(t("group_no_recipients"), "error");
+    return;
+  }
+  const entries = validFiles.map((file) => {
+    const entry = {
+      kind: "file",
+      file,
+      name: sanitizeFileName(file.name),
+      transferId: randomID(),
+      recipients,
+      cancelled: false,
+      connections: new Set(),
+      invalidRecipients: new Set(),
+      generation: groupTransferGeneration,
+      roomId: snapshot.roomId,
+      completed: 0,
+      ui: null,
+    };
+    entry.ui = createGroupOutgoingTransferItem(file, recipients);
+    groupOutgoingTransfers.add(entry);
+    entry.ui.cancel.onclick = () => {
+      entry.cancelled = true;
+      entry.ui.detail.textContent = t("file_cancelled");
+      for (const active of entry.connections) {
+        active.cancelled = true;
+        safeConnectionClose(active.connection);
+      }
+      entry.ui.cancel.disabled = true;
+    };
+    return entry;
+  });
+  if (!entries.length) return;
+  void processGroupFileBatch(entries, recipientIds).catch((error) => {
+    if (groupTransferRoomIsCurrent(snapshot.roomId)) {
+      setStatus(format("file_failed", { message: redact(error.message) }), "error");
+    }
+    recordGroupError(error);
+  });
+}
+
+async function processGroupFileBatch(entries, recipientIds) {
+  const batchItems = entries.map((entry) => ({ transferId: entry.transferId, size: entry.file.size }));
+  // A recipient can accept only one TCF1 stream at a time. Hold one of the
+  // two global recipient slots and send that recipient's files serially;
+  // different recipients may still progress independently.
+  const recipients = entries[0]?.recipients || [];
+  const tasks = recipients.map((recipient) => scheduleGroupRecipientTransfer(
+    entries[0]?.roomId || "",
+    recipient.id,
+    async () => {
+      for (const entry of entries) {
+        try {
+          assertGroupTransferMayStart(entry, recipient.id);
+          // A ticket is issued only when this recipient reaches a transfer
+          // slot and the preceding file for that recipient has completed.
+          const response = await groupRoom.requestTransferTickets({
+            kind: "file",
+            items: batchItems,
+            recipientIds,
+            targetTransferId: entry.transferId,
+            targetRecipientId: recipient.id,
+          });
+          const grant = response.grants[0];
+          if (!grant) throw new Error(response.failures[0]?.reason || "transfer ticket rejected");
+          assertGroupTransferMayStart(entry, recipient.id);
+          await sendGroupFileTransfer(entry, grant);
+          setGroupTransferRecipientStatus(entry, recipient.id, "group_transfer_complete", "complete");
+        } catch (error) {
+          const rejected = error?.groupTransferStatus === "rejected";
+          setGroupTransferRecipientStatus(
+            entry,
+            recipient.id,
+            rejected ? "group_transfer_rejected" : "group_transfer_failed",
+            rejected ? "rejected" : "failed",
+          );
+          if (!entry.cancelled) recordGroupError(error);
+        } finally {
+          entry.completed += 1;
+          entry.ui.progress.value = entry.recipients.length ? entry.completed / entry.recipients.length : 1;
+        }
+      }
+    },
+  ));
+  await Promise.allSettled(tasks);
+  for (const entry of entries) {
+    for (const recipient of entry.recipients) {
+      const recipientStatus = entry.ui.statuses.get(recipient.id);
+      if (recipientStatus?.item.dataset.status) continue;
+      setGroupTransferRecipientStatus(entry, recipient.id, "group_transfer_failed", "failed");
+      entry.completed += 1;
+    }
+    const summary = summarizeGroupTransfer(entry, "file_sent");
+    entry.ui.progress.value = 1;
+    entry.ui.detail.textContent = summary.message;
+    entry.ui.cancel.disabled = true;
+    finishTransferItem(entry.ui);
+    if (!entry.cancelled && summary.complete > 0 && groupTransferRoomIsCurrent(entry.roomId)) addMessage({
+      type: "file",
+      mine: true,
+      name: entry.name,
+      size: entry.file.size,
+      status: summary.message,
+      senderName: groupMemberById(groupRoom.memberId)?.displayName,
+      senderCode: groupMemberById(groupRoom.memberId)?.code,
+      senderRole: groupMemberById(groupRoom.memberId)?.role,
+    });
+    entry.file = null;
+    groupOutgoingTransfers.delete(entry);
+  }
+  const states = entries.flatMap((entry) => [...entry.ui.statuses.values()].map(({ item }) => item.dataset.status));
+  const completed = states.filter((state) => state === "complete").length;
+  const message = completed === states.length && states.length
+    ? t("file_sent")
+    : (completed ? format("group_transfer_partial", { complete: completed, total: states.length }) : t("group_transfer_none_complete"));
+  if (groupTransferRoomIsCurrent(entries[0]?.roomId)) {
+    setStatus(message, completed === states.length && states.length ? "connected" : "error");
+  }
+}
+
+async function sendGroupFileTransfer(entry, grant) {
+  const controller = groupRoom;
+  const controllerEpoch = controller?.lifecycleEpoch;
+  const context = {
+    mode: "group",
+    roomId: grant.roomId,
+    senderId: grant.senderId,
+    recipientId: grant.recipientId,
+    transferId: grant.transferId,
+  };
+  let connection = null;
+  let active = null;
+  let hasher = null;
+  let transportEntry = null;
+  let sent = 0;
+  await wakeLocks.acquire("file-transfer");
+  try {
+    assertGroupTransferControllerCurrent(controller, controllerEpoch, entry, grant.recipientId);
+    if (grant.roomId !== entry.roomId) throw new Error(t("group_status_closed"));
+    transportEntry = controller.getTransport(grant.address);
+    const transport = await transportEntry;
+    try {
+      assertGroupTransferControllerCurrent(controller, controllerEpoch, entry, grant.recipientId);
+    } catch (error) {
+      controller.dropTransport(grant.address, transportEntry);
+      throw error;
+    }
+    try {
+      connection = await transport.dial({ port: APP_CONFIG.ports.file });
+    } catch (error) {
+      controller.dropTransport(grant.address, transportEntry);
+      throw error;
+    }
+    assertGroupTransferControllerCurrent(controller, controllerEpoch, entry, grant.recipientId);
+    active = { connection, senderId: grant.senderId, recipientId: grant.recipientId, cancelled: false };
+    entry.connections.add(active);
+    groupTransferConnections.add(active);
+    if (entry.cancelled) throw new Error(t("file_cancelled"));
+    const reader = new ConnectionReader(connection, TRANSFER_DECISION_DEADLINE_MS);
+    hasher = tailcatNewSHA256();
+    const offer = fileWireMeta(context, "OFFER", {
+      ticket: grant.ticket,
+      name: entry.name,
+      size: entry.file.size,
+      mime: safeMime(entry.file.type),
+      chunkBytes: APP_CONFIG.limits.fileChunkBytes,
+    });
+    await withConnectionDeadline(connection, (async () => {
+      await connection.write(TCF_MAGIC);
+      await connection.write(packFileJSON(FILE_FRAME.META, offer));
+    })(), STREAM_READ_TIMEOUT_MS, "group file offer write timed out");
+    setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_pending", "pending");
+    const response = decodeFileJSON(await withConnectionDeadline(
+      connection,
+      readFileFrame(reader),
+      TRANSFER_DECISION_DEADLINE_MS,
+      "group file decision timed out",
+    ), [FILE_FRAME.META, FILE_FRAME.CANCEL]);
+    if (!fileWireMatches(response, context)) throw new Error("group file response rejected");
+    if (response.type !== "ACCEPT") {
+      const error = new Error(response.reason || t("file_rejected"));
+      if (response.type === "REJECT") error.groupTransferStatus = "rejected";
+      throw error;
+    }
+    setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_accepted", "accepted");
+    setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_sending", "transferring");
+    const dataDeadlineAt = Date.now() + fileDataDeadlineMs(entry.file.size);
+    while (sent < entry.file.size) {
+      if (entry.cancelled || active.cancelled) {
+        await withConnectionUntil(
+          connection,
+          connection.write(packFileJSON(FILE_FRAME.CANCEL, fileWireMeta(context, "CANCEL"))),
+          dataDeadlineAt,
+          "group file cancellation timed out",
+        );
+        throw new Error(t("file_cancelled"));
+      }
+      const end = Math.min(sent + APP_CONFIG.limits.fileChunkBytes, entry.file.size);
+      const chunk = new Uint8Array(await entry.file.slice(sent, end).arrayBuffer());
+      if (chunk.length !== end - sent) throw new Error("file changed while reading");
+      await hasher.update(chunk);
+      await withConnectionUntil(
+        connection,
+        connection.write(packFileFrame(FILE_FRAME.DATA, chunk)),
+        dataDeadlineAt,
+        "group file data deadline exceeded",
+      );
+      sent = end;
+    }
+    const digest = await hasher.digestHex();
+    await withConnectionUntil(
+      connection,
+      connection.write(packFileJSON(FILE_FRAME.FINAL, fileWireMeta(context, "FINAL", {
+        size: sent,
+        sha256: digest,
+      }))),
+      dataDeadlineAt,
+      "group file final deadline exceeded",
+    );
+    const done = decodeFileJSON(await withConnectionDeadline(
+      connection,
+      readFileFrame(reader),
+      STREAM_READ_TIMEOUT_MS,
+      "group file completion timed out",
+    ), [FILE_FRAME.FINAL, FILE_FRAME.CANCEL]);
+    if (!fileWireMatches(done, context)
+      || done.type !== "DONE"
+      || done.size !== sent
+      || done.sha256 !== digest) throw new Error(done.reason || "receiver verification failed");
+  } finally {
+    hasher?.close();
+    if (active) {
+      entry.connections.delete(active);
+      groupTransferConnections.delete(active);
+    }
+    connection?.close();
+    await wakeLocks.release("file-transfer");
+  }
+}
+
 function enqueueFiles(files) {
+  if (groupRoom?.active) {
+    enqueueGroupFiles(files);
+    return;
+  }
   if (!activeSession) {
     setStatus(t("need_peer"), "error");
     return;
@@ -1767,7 +3511,7 @@ async function sendFileTransfer(entry) {
     });
     entry.connection = connection;
     if (entry.cancelled) throw new Error(t("file_cancelled"));
-    const reader = new ConnectionReader(connection, FILE_DECISION_TIMEOUT_MS + 10_000);
+    const reader = new ConnectionReader(connection, TRANSFER_DECISION_DEADLINE_MS);
     hasher = tailcatNewSHA256();
     const offer = {
       type: "OFFER",
@@ -1779,11 +3523,18 @@ async function sendFileTransfer(entry) {
       mime: safeMime(entry.file.type),
       chunkBytes: APP_CONFIG.limits.fileChunkBytes,
     };
-    await connection.write(TCF_MAGIC);
-    await connection.write(packFileJSON(FILE_FRAME.META, offer));
+    await withConnectionDeadline(connection, (async () => {
+      await connection.write(TCF_MAGIC);
+      await connection.write(packFileJSON(FILE_FRAME.META, offer));
+    })(), STREAM_READ_TIMEOUT_MS, "file offer write timed out");
     entry.ui.detail.textContent = t("file_waiting");
 
-    const response = decodeFileJSON(await readFileFrame(reader), [FILE_FRAME.META, FILE_FRAME.CANCEL]);
+    const response = decodeFileJSON(await withConnectionDeadline(
+      connection,
+      readFileFrame(reader),
+      TRANSFER_DECISION_DEADLINE_MS,
+      "file decision timed out",
+    ), [FILE_FRAME.META, FILE_FRAME.CANCEL]);
     if (response.v !== APP_CONFIG.protocolVersion || response.session !== session || response.transferId !== transferId) {
       throw new Error("file response session rejected");
     }
@@ -1803,7 +3554,9 @@ async function sendFileTransfer(entry) {
     // intentionally never used.
     while (sent < entry.file.size) {
       if (entry.cancelled) {
-        await connection.write(packFileJSON(FILE_FRAME.CANCEL, { type: "CANCEL", v: APP_CONFIG.protocolVersion, session, transferId }));
+        await connection.write(packFileJSON(FILE_FRAME.CANCEL, {
+          type: "CANCEL", v: APP_CONFIG.protocolVersion, session, transferId,
+        }));
         throw new Error(t("file_cancelled"));
       }
       const end = Math.min(sent + APP_CONFIG.limits.fileChunkBytes, entry.file.size);
@@ -1831,7 +3584,12 @@ async function sendFileTransfer(entry) {
       size: sent,
       sha256: digest,
     }));
-    const finalResponse = decodeFileJSON(await readFileFrame(reader), [FILE_FRAME.FINAL, FILE_FRAME.CANCEL]);
+    const finalResponse = decodeFileJSON(await withConnectionDeadline(
+      connection,
+      readFileFrame(reader),
+      STREAM_READ_TIMEOUT_MS,
+      "file completion timed out",
+    ), [FILE_FRAME.FINAL, FILE_FRAME.CANCEL]);
     if (finalResponse.v !== APP_CONFIG.protocolVersion
       || finalResponse.session !== session
       || finalResponse.transferId !== transferId) throw new Error("final file response session rejected");
@@ -1861,42 +3619,127 @@ async function receiveFile(connection) {
   let localArtifactReady = false;
   let terminalWriteStarted = false;
   let offer = null;
-  const reader = new ConnectionReader(connection);
+  let context = null;
+  let groupTicket = null;
+  let groupController = null;
+  let groupEpoch = 0;
+  let groupGeneration = 0;
+  let transferState = null;
+  const reader = new ConnectionReader(connection, TRANSFER_DECISION_DEADLINE_MS);
+  const offerDeadlineAt = Date.now() + STREAM_READ_TIMEOUT_MS;
   await wakeLocks.acquire("file-transfer");
   try {
-    const magic = await reader.readExact(4);
+    const magic = await withConnectionUntil(
+      connection,
+      reader.readExact(4),
+      offerDeadlineAt,
+      "file offer preamble timed out",
+    );
     if (!equalBytes(magic, TCF_MAGIC)) throw new Error("invalid TCF1 preamble");
-    offer = decodeFileJSON(await readFileFrame(reader), [FILE_FRAME.META]);
-    if (offer.type !== "OFFER"
-      || offer.v !== APP_CONFIG.protocolVersion
-      || !hasSession(offer)
-      || typeof offer.transferId !== "string"
-      || !/^[0-9a-f]{32}$/u.test(offer.transferId)
-      || !validFileSize(offer.size)
-      || offer.chunkBytes !== APP_CONFIG.limits.fileChunkBytes) throw new Error("file offer rejected");
+    offer = decodeFileJSON(await withConnectionUntil(
+      connection,
+      readFileFrame(reader),
+      offerDeadlineAt,
+      "file offer timed out",
+    ), [FILE_FRAME.META]);
+    const groupOffer = offer.mode === "group";
+    if (groupOffer) {
+      if (offer.type !== "OFFER"
+        || offer.v !== APP_CONFIG.protocolVersion
+        || offer.gv !== GROUP_PROTOCOL_VERSION
+        || !groupRoom?.active
+        || !/^[0-9a-f]{32}$/u.test(offer.transferId)
+        || !validFileSize(offer.size)
+        || offer.chunkBytes !== APP_CONFIG.limits.fileChunkBytes) throw new Error("group file offer rejected");
+      groupController = groupRoom;
+      groupEpoch = groupController.lifecycleEpoch;
+      groupGeneration = groupTransferGeneration;
+      groupTicket = await groupController.consumeTransferTicket(offer, "file", offer.size);
+      context = {
+        mode: "group",
+        roomId: groupTicket.roomId,
+        senderId: groupTicket.senderId,
+        recipientId: groupTicket.recipientId,
+        transferId: groupTicket.transferId,
+      };
+      if (!groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration)) {
+        throw new Error("group file room changed during ticket validation");
+      }
+    } else {
+      if (offer.type !== "OFFER"
+        || offer.v !== APP_CONFIG.protocolVersion
+        || !hasSession(offer)
+        || typeof offer.transferId !== "string"
+        || !/^[0-9a-f]{32}$/u.test(offer.transferId)
+        || !validFileSize(offer.size)
+        || offer.chunkBytes !== APP_CONFIG.limits.fileChunkBytes) throw new Error("file offer rejected");
+      // Capture the authenticated session from the offer. The global session
+      // may be cleared while an automatic OPFS sink is being prepared.
+      context = { mode: "private", session: offer.session, transferId: offer.transferId };
+    }
     offer.name = sanitizeFileName(offer.name);
     offer.mime = safeMime(offer.mime);
-    noteAuthenticatedPeerTraffic();
+    noteFileTraffic(context);
 
     if (activeFileTransfer) {
-      await connection.write(packFileJSON(FILE_FRAME.META, {
-        type: "REJECT", v: APP_CONFIG.protocolVersion, session: activeSession,
-        transferId: offer.transferId, reason: "BUSY",
-      }));
+      await withConnectionDeadline(
+        connection,
+        connection.write(packFileJSON(FILE_FRAME.META, fileWireMeta(context, "REJECT", { reason: "BUSY" }))),
+        STREAM_READ_TIMEOUT_MS,
+        "file busy response timed out",
+      );
       return;
     }
-    activeFileTransfer = { direction: "incoming", connection, transferId: offer.transferId, cancelled: false, sink: null };
-    await refreshFileSinkSupport();
+    transferState = {
+      direction: "incoming",
+      connection,
+      transferId: offer.transferId,
+      cancelled: false,
+      sink: null,
+      group: context.mode === "group",
+      senderId: context.senderId || "",
+      recipientId: context.recipientId || "",
+      roomId: context.roomId || "",
+      generation: groupGeneration,
+    };
+    activeFileTransfer = transferState;
+    let automaticReceive = false;
+    const capacity = await withConnectionDeadline(connection, (async () => {
+      await refreshFileSinkSupport();
+      if (context.mode === "private" && canAutoReceivePrivateFile(offer.size, context.session)) {
+        const automaticCapacity = await getReceiveCapacity(offer.size, {
+          kind: FILE_SINK_KIND.OPFS_EXPORT,
+          hardMaxBytes: APP_CONFIG.limits.fileBytes,
+        });
+        automaticReceive = automaticCapacity.ok;
+      }
+      return getReceiveCapacity(offer.size, {
+        kind: fileSinkSupport.preferredKind,
+        hardMaxBytes: APP_CONFIG.limits.fileBytes,
+      });
+    })(), STREAM_READ_TIMEOUT_MS, "file capacity check timed out");
+    if (activeFileTransfer !== transferState
+      || transferState.cancelled
+      || (context.mode === "private" && activeSession !== context.session)
+      || (context.mode === "group"
+        && !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
+      throw new Error("file offer is no longer current");
+    }
+    if (automaticReceive && !consumePrivateAutoReceiveBudget(offer.size, context.session)) {
+      automaticReceive = false;
+    }
     const sinkKind = fileSinkSupport.preferredKind;
-    const capacity = await getReceiveCapacity(offer.size, {
-      kind: sinkKind,
-      hardMaxBytes: APP_CONFIG.limits.fileBytes,
-    });
     if (!capacity.ok) {
-      await connection.write(packFileJSON(FILE_FRAME.META, {
-        type: "REJECT", v: APP_CONFIG.protocolVersion, session: activeSession,
-        transferId: offer.transferId, reason: capacity.reason || FILE_SINK_REASON.NO_SINK,
-      }));
+      await withConnectionDeadline(connection, connection.write(packFileJSON(
+        FILE_FRAME.META,
+        fileWireMeta(context, "REJECT", { reason: capacity.reason || FILE_SINK_REASON.NO_SINK }),
+      )), STREAM_READ_TIMEOUT_MS, "file capacity response timed out");
+      if (context.mode === "group"
+        && (activeFileTransfer !== transferState
+          || transferState.cancelled
+          || !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
+        return;
+      }
       const key = capacity.reason === FILE_SINK_REASON.INSUFFICIENT_SPACE
         || capacity.reason === FILE_SINK_REASON.NO_STORAGE_ESTIMATE
         ? "file_space_insufficient"
@@ -1906,8 +3749,21 @@ async function receiveFile(connection) {
     }
 
     tcTest.state.file = "offered";
-    ui = createIncomingTransferItem(offer);
-    const decision = await waitForIncomingFileDecision(ui, offer, connection, sinkKind);
+    const groupSender = context.mode === "group"
+      ? groupController.snapshot().members.find((member) => member.id === context.senderId)
+      : null;
+    ui = createIncomingTransferItem(offer, { sender: groupSender, automaticReceive });
+    if (context.mode === "group") markGroupTransferItem(ui, context.roomId);
+    const decision = await waitForIncomingFileDecision(
+      ui,
+      offer,
+      connection,
+      sinkKind,
+      context,
+      reader,
+      { automaticReceive },
+    );
+    if (decision.error) throw decision.error;
     if (!decision.accepted) return;
     sink = decision.sink;
     activeFileTransfer.sink = sink;
@@ -1917,19 +3773,53 @@ async function receiveFile(connection) {
     tcTest.recvDone = false;
     tcTest.recvBytes = 0;
     tcTest.recvSha256 = null;
-    await connection.write(packFileJSON(FILE_FRAME.META, {
-      type: "ACCEPT", v: APP_CONFIG.protocolVersion, session: activeSession, transferId: offer.transferId,
-    }));
+    if (activeFileTransfer !== transferState
+      || transferState.cancelled
+      || (context.mode === "private" && activeSession !== context.session)
+      || (context.mode === "group"
+        && !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
+      throw new Error("file offer session changed before acceptance");
+    }
+    await withConnectionDeadline(
+      connection,
+      connection.write(packFileJSON(FILE_FRAME.META, fileWireMeta(context, "ACCEPT"))),
+      STREAM_READ_TIMEOUT_MS,
+      "file acceptance write timed out",
+    );
     ui.save.classList.add("hidden");
     ui.reject.classList.add("hidden");
     ui.cancel.classList.remove("hidden");
 
     let received = 0;
+    let prefetchedHeader = decision.prefetchedHeader;
+    // Group transfers have a whole-body deadline so a selected recipient
+    // cannot hold a group transfer slot forever. Private TCF1 retains its v1
+    // per-read stall semantics and therefore has no aggregate throughput floor.
+    reader.timeoutMs = STREAM_READ_TIMEOUT_MS;
+    const dataDeadlineAt = context.mode === "group"
+      ? Date.now() + fileDataDeadlineMs(offer.size)
+      : 0;
     for (;;) {
-      const frame = await readFileFrame(reader);
+      const frameOperation = prefetchedHeader
+        ? prefetchedHeader.then((header) => readFileFramePayload(reader, header))
+        : readFileFrame(reader);
+      const frame = context.mode === "group"
+        ? await withConnectionUntil(
+          connection,
+          frameOperation,
+          dataDeadlineAt,
+          "file data deadline exceeded",
+        )
+        : await withConnectionDeadline(
+          connection,
+          frameOperation,
+          STREAM_READ_TIMEOUT_MS,
+          "file data read timed out",
+        );
+      prefetchedHeader = null;
       if (frame.kind === FILE_FRAME.CANCEL) {
         const cancel = decodeFileJSON(frame, [FILE_FRAME.CANCEL]);
-        if (!hasSession(cancel) || cancel.transferId !== offer.transferId) throw new Error("cancel session rejected");
+        if (!fileWireMatches(cancel, context)) throw new Error("cancel session rejected");
         throw new Error(t("file_cancelled"));
       }
       if (frame.kind === FILE_FRAME.DATA) {
@@ -1949,55 +3839,66 @@ async function receiveFile(connection) {
           received: humanSize(received),
           total: humanSize(offer.size),
         });
-        noteAuthenticatedPeerTraffic();
+        noteFileTraffic(context);
         continue;
       }
       if (frame.kind !== FILE_FRAME.FINAL) throw new Error("unexpected frame during file body");
       const final = decodeFileJSON(frame, [FILE_FRAME.FINAL]);
       if (final.type !== "FINAL"
-        || !hasSession(final)
-        || final.transferId !== offer.transferId
+        || !fileWireMatches(final, context)
         || final.size !== received
         || received !== offer.size
         || !/^[0-9a-f]{64}$/u.test(final.sha256)) throw new Error("invalid final file frame");
       const digest = await hasher.digestHex();
       if (digest !== final.sha256) throw new Error(t("file_hash_failed"));
-      noteAuthenticatedPeerTraffic();
+      noteFileTraffic(context);
       await sink.close();
       let stagedExport = null;
       if (sink.kind === FILE_SINK_KIND.OPFS_EXPORT) stagedExport = await sink.prepareExport();
       localArtifactReady = true;
-      const doneFrame = packFileJSON(FILE_FRAME.FINAL, {
-        type: "DONE", v: APP_CONFIG.protocolVersion, session: activeSession,
-        transferId: offer.transferId, size: received, sha256: digest,
-      });
+      const doneFrame = packFileJSON(FILE_FRAME.FINAL, fileWireMeta(context, "DONE", {
+        size: received,
+        sha256: digest,
+      }));
       terminalWriteStarted = true;
       let confirmationError = null;
       try {
-        await connection.write(doneFrame);
+        await withConnectionDeadline(
+          connection,
+          connection.write(doneFrame),
+          STREAM_READ_TIMEOUT_MS,
+          "file completion confirmation timed out",
+        );
         completed = true;
       } catch (error) {
         // A transport may report an error after the complete DONE frame was
         // handed to its peer. Preserve the already verified local artifact,
         // but do not claim that the sender received the confirmation.
         confirmationError = error;
-        recordError(error);
+        if (context.mode === "group") recordGroupError(error);
+        else recordError(error);
       }
       if (completed) {
         // The sender treats the DONE frame itself as terminal and does not wait
         // for EOF, so a half-close failure must never roll back a saved file.
         try {
-          await connection.closeWrite();
+          await withConnectionDeadline(
+            connection,
+            connection.closeWrite(),
+            STREAM_READ_TIMEOUT_MS,
+            "file completion close timed out",
+          );
         } catch (error) {
-          recordError(error);
+          if (context.mode === "group") recordGroupError(error);
+          else recordError(error);
         }
       }
-      tcTest.recvSha256 = digest;
+      if (context.mode !== "group") tcTest.recvSha256 = digest;
       tcTest.recvDone = completed;
       ui.progress.value = 1;
       ui.cancel.classList.add("hidden");
       if (stagedExport) {
-        configureStagedFileUI(ui, sink, stagedExport);
+        configureStagedFileUI(ui, sink, stagedExport, { group: context.mode === "group" });
         const stagedStatus = confirmationError ? t("file_staged_confirmation_unknown") : t("file_staged");
         ui.detail.textContent = stagedStatus;
         ui.localNote.textContent = stagedStatus;
@@ -2008,8 +3909,22 @@ async function receiveFile(connection) {
       const status = confirmationError
         ? t(stagedExport ? "file_staged_confirmation_unknown" : "file_saved_confirmation_unknown")
         : t(stagedExport ? "file_staged" : "file_verified");
-      addMessage({ type: "file", mine: false, name: offer.name, size: offer.size, status });
-      setStatus(status, confirmationError ? "error" : "connected");
+      const sender = context.mode === "group" ? groupMemberById(context.senderId) : null;
+      const roomStillVisible = context.mode !== "group"
+        || (groupRoom?.active && groupRoom.roomId === context.roomId);
+      if (roomStillVisible) {
+        addMessage({
+          type: "file",
+          mine: false,
+          name: offer.name,
+          size: offer.size,
+          status,
+          senderName: sender?.displayName,
+          senderCode: sender?.code,
+          senderRole: sender?.role,
+        });
+        setStatus(status, confirmationError ? "error" : "connected");
+      }
       break;
     }
   } catch (error) {
@@ -2021,19 +3936,22 @@ async function receiveFile(connection) {
       } catch (_) {}
       sink = null;
     }
-    if (accepted && offer && activeSession && !terminalWriteStarted) {
+    if (accepted && offer && context && !terminalWriteStarted) {
       try {
-        await connection.write(packFileJSON(FILE_FRAME.CANCEL, {
-          type: "ERROR", v: APP_CONFIG.protocolVersion, session: activeSession,
-          transferId: offer.transferId, reason: "TRANSFER_ABORTED",
-        }));
+        await withConnectionDeadline(connection, connection.write(packFileJSON(
+          FILE_FRAME.CANCEL,
+          fileWireMeta(context, "ERROR", { reason: "TRANSFER_ABORTED" }),
+        )), STREAM_READ_TIMEOUT_MS, "file cancellation response timed out");
       } catch (_) {}
     }
     if (ui) {
       ui.detail.textContent = error.message === t("file_hash_failed") ? t("file_hash_failed") : format("file_failed", { message: redact(error.message) });
       ui.cancel.classList.add("hidden");
     }
-    if (accepted) recordError(error);
+    if (accepted) {
+      if (context?.mode === "group" || offer?.mode === "group") recordGroupError(error);
+      else recordError(error);
+    }
   } finally {
     const preserveVerifiedSink = localArtifactReady && terminalWriteStarted;
     if (!completed && sink && !preserveVerifiedSink) {
@@ -2052,8 +3970,9 @@ async function receiveFile(connection) {
   }
 }
 
-function createIncomingTransferItem(offer) {
+function createIncomingTransferItem(offer, { sender = null, automaticReceive = false } = {}) {
   const fragment = $("incoming-file-template").content.cloneNode(true);
+  i18n.apply(fragment);
   const item = fragment.querySelector("li");
   const name = fragment.querySelector(".transfer-name");
   const detail = fragment.querySelector(".transfer-detail");
@@ -2061,25 +3980,54 @@ function createIncomingTransferItem(offer) {
   const save = fragment.querySelector(".save-file");
   const reject = fragment.querySelector(".reject-file");
   const cancel = fragment.querySelector(".cancel-file");
+  const openFile = fragment.querySelector(".open-file");
   const exportFile = fragment.querySelector(".export-file");
   const deleteFile = fragment.querySelector(".delete-file");
   const localNote = fragment.querySelector(".transfer-local-note");
-  name.textContent = `${t("file_offer")}: ${offer.name}`;
-  detail.textContent = format("file_offer_detail", { name: offer.name, size: humanSize(offer.size) });
+  item.dataset.receiveMode = automaticReceive ? "automatic" : "manual";
+  name.textContent = sender
+    ? format("group_file_offer", { identity: groupMemberIdentity(sender), name: offer.name })
+    : `${t("file_offer")}: ${offer.name}`;
+  detail.textContent = format(automaticReceive ? "file_offer_detail_auto" : "file_offer_detail", {
+    name: offer.name,
+    size: humanSize(offer.size),
+  });
   save.textContent = fileSinkSupport.preferredKind === FILE_SINK_KIND.OPFS_EXPORT ? t("accept_receive") : t("choose_save");
   reject.textContent = t("reject");
   cancel.textContent = t("cancel");
+  openFile.textContent = t("file_open");
   exportFile.textContent = t("file_export");
   deleteFile.textContent = t("file_delete_local");
   $("transfer-list").append(fragment);
   renderTransferCount();
-  return { item, name, detail, progress, save, reject, cancel, export: exportFile, delete: deleteFile, localNote };
+  return {
+    item,
+    name,
+    detail,
+    progress,
+    save,
+    reject,
+    cancel,
+    open: openFile,
+    export: exportFile,
+    delete: deleteFile,
+    localNote,
+  };
 }
 
-function waitForIncomingFileDecision(ui, offer, connection, sinkKind) {
+function waitForIncomingFileDecision(
+  ui,
+  offer,
+  connection,
+  sinkKind,
+  context,
+  reader,
+  { automaticReceive = false } = {},
+) {
   return new Promise((resolve) => {
     let claimed = false;
     let resolved = false;
+    let timeout = null;
     const releaseDecision = () => {
       clearTimeout(timeout);
       if (activeFileTransfer?.connection === connection) activeFileTransfer.cancelDecision = null;
@@ -2098,21 +4046,68 @@ function waitForIncomingFileDecision(ui, offer, connection, sinkKind) {
       releaseDecision();
       resolve(value);
     };
+    const createSink = (kind) => createFileSink({
+      kind,
+      transferId: offer.transferId,
+      name: offer.name,
+      size: offer.size,
+      mime: offer.mime,
+      hardMaxBytes: APP_CONFIG.limits.fileBytes,
+    });
     const rejectOffer = async (reason, label = t("file_rejected")) => {
       if (!claim()) return;
       ui.detail.textContent = label;
       try {
-        await connection.write(packFileJSON(FILE_FRAME.META, {
-          type: "REJECT", v: APP_CONFIG.protocolVersion, session: activeSession,
-          transferId: offer.transferId, reason,
-        }));
+        await withConnectionDeadline(
+          connection,
+          connection.write(packFileJSON(FILE_FRAME.META, fileWireMeta(context, "REJECT", { reason }))),
+          STREAM_READ_TIMEOUT_MS,
+          "file rejection write timed out",
+        );
       } catch (_) {
         // Closing the stream below is also an unambiguous rejection.
       } finally {
         finish({ accepted: false });
       }
     };
-    const timeout = setTimeout(() => rejectOffer("OFFER_TIMEOUT", t("file_cancelled")), FILE_DECISION_TIMEOUT_MS);
+    // Start one read while the consent UI is open. A sender that cancels by
+    // closing its stream releases the prompt immediately. If the user accepts
+    // first, this same promise becomes the first DATA/CANCEL frame so no bytes
+    // are lost to a competing reader.
+    const prefetchedHeader = readFileFrameHeader(reader);
+    void prefetchedHeader.then(async (header) => {
+      if (resolved) return;
+      try {
+        if (header.kind !== FILE_FRAME.CANCEL || header.length > TRANSFER_CANCEL_MAX_BYTES) {
+          throw new Error("file data arrived before acceptance");
+        }
+        // Claim before reading even the bounded cancellation metadata so a
+        // simultaneous save-picker completion cannot accept a cancelled offer.
+        if (!claim()) return;
+        const frame = await withConnectionDeadline(
+          connection,
+          readFileFramePayload(reader, header),
+          STREAM_READ_TIMEOUT_MS,
+          "file cancellation frame timed out",
+        );
+        const cancel = decodeFileJSON(frame, [FILE_FRAME.CANCEL]);
+        if (!fileWireMatches(cancel, context) || cancel.type !== "CANCEL") {
+          throw new Error("invalid file cancellation before acceptance");
+        }
+        ui.detail.textContent = t("file_cancelled");
+        finish({ accepted: false });
+      } catch (error) {
+        claim();
+        finish({ accepted: false, error });
+      }
+    }, (error) => {
+      if (resolved) return;
+      claim();
+      const remoteClosed = /(?:end of stream|closed)/iu.test(String(error?.message || error));
+      ui.detail.textContent = remoteClosed ? t("file_cancelled") : format("file_failed", { message: redact(error.message) });
+      finish(remoteClosed ? { accepted: false } : { accepted: false, error });
+    });
+    timeout = setTimeout(() => { void rejectOffer("OFFER_TIMEOUT", t("file_cancelled")); }, FILE_DECISION_TIMEOUT_MS);
     if (activeFileTransfer?.connection === connection) {
       activeFileTransfer.cancelDecision = () => rejectOffer("ROOM_CLOSED", t("file_cancelled"));
     }
@@ -2123,19 +4118,12 @@ function waitForIncomingFileDecision(ui, offer, connection, sinkKind) {
       // This call is deliberately inside the click handler so Chrome treats it
       // as a user-initiated save decision.
       try {
-        const sink = await createFileSink({
-          kind: sinkKind,
-          transferId: offer.transferId,
-          name: offer.name,
-          size: offer.size,
-          mime: offer.mime,
-          hardMaxBytes: APP_CONFIG.limits.fileBytes,
-        });
+        const sink = await createSink(sinkKind);
         if (!claim()) {
           try { await sink.abort(); } catch (_) {}
           return;
         }
-        finish({ accepted: true, sink });
+        finish({ accepted: true, sink, prefetchedHeader });
       } catch (error) {
         if (!claimed) await rejectOffer("USER_CANCELLED");
       }
@@ -2147,10 +4135,33 @@ function waitForIncomingFileDecision(ui, offer, connection, sinkKind) {
         connection.close();
       }
     };
+    if (automaticReceive) {
+      ui.save.classList.add("hidden");
+      ui.reject.classList.add("hidden");
+      ui.cancel.classList.remove("hidden");
+      ui.detail.textContent = t("file_auto_preparing");
+      void createSink(FILE_SINK_KIND.OPFS_EXPORT).then(async (sink) => {
+        if (!claim()) {
+          try { await sink.abort(); } catch (_) {}
+          return;
+        }
+        finish({ accepted: true, sink, prefetchedHeader, automatic: true });
+      }).catch(() => {
+        if (claimed || resolved) return;
+        ui.item.dataset.receiveMode = "manual-fallback";
+        ui.detail.textContent = t("file_auto_fallback");
+        ui.save.disabled = false;
+        ui.reject.disabled = false;
+        ui.save.classList.remove("hidden");
+        ui.reject.classList.remove("hidden");
+        ui.cancel.classList.add("hidden");
+      });
+    }
   });
 }
 
-function configureStagedFileUI(ui, sink, prepared) {
+function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
+  const reportError = group ? recordGroupError : recordError;
   let removed = false;
   let removalPromise = null;
   let useDownloadFallback = !prepared.canShare;
@@ -2161,10 +4172,19 @@ function configureStagedFileUI(ui, sink, prepared) {
       await sink.remove();
       removed = true;
       prepared.dispose();
+      ui.open.onclick = null;
       ui.export.onclick = null;
       ui.delete.onclick = null;
+      ui.open.classList.add("hidden");
+      ui.export.classList.add("hidden");
+      ui.delete.classList.add("hidden");
       transferItemCleanups.delete(ui.item);
       stagedTransferItems.delete(ui.item);
+      const transferRoomId = groupTransferRooms.get(ui.item);
+      if (transferRoomId
+        && (!groupRoom?.active || groupRoom.roomId !== transferRoomId)) {
+        discardGroupTransferItem(ui.item);
+      }
       pruneFinishedTransferItems();
       renderTransferCount();
       if (!activeSession) setMobileState(restingMobileState());
@@ -2177,9 +4197,26 @@ function configureStagedFileUI(ui, sink, prepared) {
     }
   };
   stagedTransferItems.add(ui.item);
+  if (ui.item.dataset.discarded === "true") {
+    delete ui.item.dataset.discarded;
+    groupTransferItems.add(ui.item);
+    $("transfer-list").append(ui.item);
+  }
   transferItemCleanups.set(ui.item, removeTemporaryFile);
+  ui.open.classList.toggle("hidden", !prepared.canOpen);
   ui.export.classList.remove("hidden");
   ui.delete.classList.remove("hidden");
+  ui.open.onclick = () => {
+    ui.open.disabled = true;
+    try {
+      prepared.open();
+    } catch (error) {
+      setStatus(t("file_open_failed"), "error");
+      reportError(error);
+    } finally {
+      ui.open.disabled = false;
+    }
+  };
   ui.export.onclick = () => {
     ui.export.disabled = true;
     if (useDownloadFallback) {
@@ -2189,7 +4226,7 @@ function configureStagedFileUI(ui, sink, prepared) {
         ui.localNote.textContent = t("file_delete_after_download");
       } catch (error) {
         setStatus(t("share_failed"), "error");
-        recordError(error);
+        reportError(error);
       } finally {
         ui.export.disabled = false;
       }
@@ -2197,6 +4234,7 @@ function configureStagedFileUI(ui, sink, prepared) {
     }
     void prepared.share().then(async () => {
       ui.detail.textContent = t("file_exported");
+      ui.open.classList.add("hidden");
       ui.export.classList.add("hidden");
       try {
         await removeTemporaryFile();
@@ -2206,7 +4244,7 @@ function configureStagedFileUI(ui, sink, prepared) {
         ui.delete.disabled = false;
         ui.localNote.textContent = t("file_cleanup_failed");
         setStatus(t("file_cleanup_failed"), "error");
-        recordError(error);
+        reportError(error);
       }
     }).catch(async (error) => {
       ui.export.disabled = false;
@@ -2215,6 +4253,7 @@ function configureStagedFileUI(ui, sink, prepared) {
           await removeTemporaryFile();
           ui.detail.textContent = t("file_local_deleted");
           ui.localNote.classList.add("hidden");
+          ui.open.classList.add("hidden");
           ui.export.classList.add("hidden");
           ui.delete.classList.add("hidden");
         } catch (cleanupError) {
@@ -2222,7 +4261,7 @@ function configureStagedFileUI(ui, sink, prepared) {
           ui.localNote.classList.remove("hidden");
           ui.localNote.textContent = t("file_cleanup_failed");
           setStatus(t("file_cleanup_failed"), "error");
-          recordError(cleanupError);
+          reportError(cleanupError);
         }
         return;
       }
@@ -2230,7 +4269,7 @@ function configureStagedFileUI(ui, sink, prepared) {
       ui.detail.textContent = t("file_share_download_fallback");
       ui.localNote.textContent = t("file_delete_after_download");
       setStatus(t("file_share_download_fallback"), "error");
-      recordError(error);
+      reportError(error);
     });
   };
   ui.delete.onclick = () => {
@@ -2238,17 +4277,19 @@ function configureStagedFileUI(ui, sink, prepared) {
     void removeTemporaryFile().then(() => {
       ui.detail.textContent = t("file_local_deleted");
       ui.localNote.classList.add("hidden");
+      ui.open.classList.add("hidden");
       ui.export.classList.add("hidden");
       ui.delete.classList.add("hidden");
     }).catch((error) => {
       ui.delete.disabled = false;
       setStatus(t("file_cleanup_failed"), "error");
-      recordError(error);
+      reportError(error);
     });
   };
 }
 
 function cancelAllTransfers() {
+  cancelGroupTransferConnections();
   for (const entry of outgoingFileQueue) {
     entry.cancelled = true;
     entry.ui.detail.textContent = t("file_cancelled");
@@ -2278,14 +4319,22 @@ let voiceCancelled = false;
 let voicePointerHeld = false;
 let voiceGesture = 0;
 let activeVoiceStream = null;
+let activeGroupVoicePlan = null;
 const voiceHoldMode = !support.mobile;
 
 async function startVoiceNote(event) {
   event.preventDefault();
   // Keep one recorder object alive until its onstop callback has completed.
   // MediaRecorder enters "inactive" before that callback is dispatched.
-  if (recorder || !activeSession) return;
-  if (peerCapabilities?.voice?.enabled !== true) {
+  const groupVoice = groupRoom?.active;
+  const groupRoomId = groupVoice ? groupRoom.roomId : "";
+  const groupRecipients = groupVoice ? selectedGroupMembers() : [];
+  const mimeType = groupVoice
+    ? selectedGroupVoiceRecordType(groupRecipients)
+    : selectedVoiceRecordType();
+  if (recorder || (!activeSession && !groupRoom?.canSend)) return;
+  if ((!groupVoice && peerCapabilities?.voice?.enabled !== true)
+    || !mimeType) {
     setStatus(t("unsupported_capability"), "error");
     return;
   }
@@ -2305,9 +4354,15 @@ async function startVoiceNote(event) {
       await wakeLocks.release("voice-note");
       return;
     }
-    const mimeType = selectedVoiceRecordType();
-    if (!mimeType) throw new Error(t("unsupported_capability"));
+    if (groupVoice && (!groupRoom?.active || groupRoom.roomId !== groupRoomId)) {
+      throw new Error(t("group_status_closed"));
+    }
     recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    activeGroupVoicePlan = groupVoice ? Object.freeze({
+      roomId: groupRoomId,
+      recipients: Object.freeze(groupRecipients.slice()),
+      mimeType,
+    }) : null;
     voiceChunks = [];
     voiceBytes = 0;
     discardVoice = false;
@@ -2338,10 +4393,12 @@ async function startVoiceNote(event) {
     stream?.getTracks().forEach((track) => track.stop());
     if (activeVoiceStream === stream) activeVoiceStream = null;
     recorder = null;
+    activeGroupVoicePlan = null;
     voicePointerHeld = false;
     await wakeLocks.release("voice-note");
     setStatus(format("microphone_failed", { message: redact(error.message) }), "error");
-    recordError(error);
+    if (groupVoice) recordGroupError(error);
+    else recordError(error);
   }
 }
 
@@ -2358,6 +4415,7 @@ function cancelActiveVoiceRecording() {
   voiceGesture += 1;
   voiceCancelled = true;
   clearTimeout(voiceLimitTimer);
+  activeGroupVoicePlan = null;
   if (recorder?.state === "recording") recorder.stop();
   activeVoiceStream?.getTracks().forEach((track) => track.stop());
   activeVoiceStream = null;
@@ -2376,14 +4434,18 @@ async function finishVoiceNote(stream) {
   $("ptt-btn").classList.remove("recording");
   $("mobile-recording-controls")?.classList.add("hidden");
   const finishedRecorder = recorder;
+  const groupPlan = activeGroupVoicePlan;
   recorder = null;
+  activeGroupVoicePlan = null;
   const duration = Math.max(1, Math.min(
     APP_CONFIG.limits.voiceSeconds,
     Math.ceil((performance.now() - voiceStartedAt) / 1000),
   ));
   if (voiceCancelled) {
     voiceChunks = [];
-    setStatus(t("voice_discarded"), activeSession ? "connected" : "ready");
+    if (activeSession || groupRoom?.active) {
+      setStatus(t("voice_discarded"), activeSession || groupRoom?.canSend ? "connected" : "ready");
+    }
     return;
   }
   if (discardVoice || voiceBytes > APP_CONFIG.limits.voiceBytes) {
@@ -2399,6 +4461,14 @@ async function finishVoiceNote(stream) {
   }
   const blob = new Blob(voiceChunks, { type: mime });
   voiceChunks = [];
+  if (groupPlan) {
+    if (!groupRoom?.active || groupRoom.roomId !== groupPlan.roomId) {
+      setStatus(t("voice_discarded"), "ready");
+      return;
+    }
+    await sendGroupVoiceNote(blob, duration, groupPlan.recipients);
+    return;
+  }
   try {
     setStatus(t("voice_sending"), "loading");
     const payload = new Uint8Array(await blob.arrayBuffer());
@@ -2421,18 +4491,560 @@ async function finishVoiceNote(stream) {
   }
 }
 
-async function receiveVoice(connection) {
+async function sendGroupVoiceNote(blob, duration, recipients) {
+  const recipientIds = [...new Set((recipients || []).map((member) => member?.id).filter(Boolean))];
+  if (!recipientIds.length) {
+    setStatus(t("group_no_recipients"), "error");
+    return;
+  }
+  if (groupOutgoingTransfers.size >= MAX_PENDING_FILES) {
+    setStatus(t("file_queue_limit"), "error");
+    return;
+  }
+  const roomId = groupRoom?.roomId || "";
+  const transferId = randomID();
+  const ui = createGroupOutgoingTransferItem({ name: t("record_voice"), size: blob.size }, recipients);
+  const entry = {
+    kind: "voice",
+    blob,
+    transferId,
+    recipients,
+    ui,
+    cancelled: false,
+    connections: new Set(),
+    invalidRecipients: new Set(),
+    generation: groupTransferGeneration,
+    roomId,
+    completed: 0,
+  };
+  groupOutgoingTransfers.add(entry);
+  ui.cancel.onclick = () => {
+    entry.cancelled = true;
+    for (const active of entry.connections) {
+      active.cancelled = true;
+      safeConnectionClose(active.connection);
+    }
+    ui.cancel.disabled = true;
+  };
   try {
-    const maximum = APP_CONFIG.limits.voiceBytes + APP_CONFIG.limits.controlBytes + 8;
-    const bytes = await readAllBounded(
+    setStatus(t("voice_sending"), "loading");
+    const batchItems = [{ transferId, size: blob.size }];
+    const tasks = recipients.map((recipient) => scheduleGroupRecipientTransfer(
+      entry.roomId,
+      recipient.id,
+      async () => {
+        try {
+          assertGroupTransferMayStart(entry, recipient.id);
+          const currentRecipient = groupMemberById(recipient.id);
+          if (!groupMemberCanReceive(currentRecipient, "voice", blob.size)
+            || !groupMemberSupportsVoiceMime(currentRecipient, blob.type)) {
+            throw new Error(t("unsupported_capability"));
+          }
+          const response = await groupRoom.requestTransferTickets({
+            kind: "voice",
+            items: batchItems,
+            recipientIds,
+            targetTransferId: transferId,
+            targetRecipientId: recipient.id,
+          });
+          const grant = response.grants[0];
+          if (!grant) throw new Error(response.failures[0]?.reason || "transfer ticket rejected");
+          assertGroupTransferMayStart(entry, recipient.id);
+          await sendGroupVoiceToRecipient(entry, grant, duration);
+          setGroupTransferRecipientStatus(entry, recipient.id, "group_transfer_complete", "complete");
+        } catch (error) {
+          const rejected = error?.groupTransferStatus === "rejected";
+          setGroupTransferRecipientStatus(
+            entry,
+            recipient.id,
+            rejected ? "group_transfer_rejected" : "group_transfer_failed",
+            rejected ? "rejected" : "failed",
+          );
+          if (!entry.cancelled) recordGroupError(error);
+        } finally {
+          entry.completed += 1;
+          ui.progress.value = recipients.length ? entry.completed / recipients.length : 1;
+        }
+      },
+    ));
+    await Promise.allSettled(tasks);
+    for (const recipient of recipients) {
+      const recipientStatus = ui.statuses.get(recipient.id);
+      if (recipientStatus?.item.dataset.status) continue;
+      setGroupTransferRecipientStatus(entry, recipient.id, "group_transfer_failed", "failed");
+      entry.completed += 1;
+    }
+    const summary = summarizeGroupTransfer(entry, "voice_delivered");
+    ui.progress.value = 1;
+    ui.detail.textContent = summary.message;
+    ui.cancel.disabled = true;
+    finishTransferItem(ui);
+    if (!entry.cancelled && summary.complete > 0 && groupTransferRoomIsCurrent(entry.roomId)) {
+      const self = groupMemberById(groupRoom.memberId);
+      addMessage({
+        type: "voice",
+        blob,
+        duration,
+        mine: true,
+        senderName: self?.displayName,
+        senderCode: self?.code,
+        senderRole: self?.role,
+      });
+    }
+    if (groupTransferRoomIsCurrent(entry.roomId)) {
+      setStatus(summary.message, summary.ok ? "connected" : "error");
+    }
+  } catch (error) {
+    for (const member of recipients) setGroupTransferRecipientStatus(entry, member.id, "group_transfer_failed", "failed");
+    ui.detail.textContent = format("voice_failed", { message: redact(error.message) });
+    ui.cancel.disabled = true;
+    finishTransferItem(ui);
+    if (groupTransferRoomIsCurrent(entry.roomId)) {
+      setStatus(format("voice_failed", { message: redact(error.message) }), "error");
+    }
+    recordGroupError(error);
+  } finally {
+    groupOutgoingTransfers.delete(entry);
+  }
+}
+
+async function sendGroupVoiceToRecipient(entry, grant, duration) {
+  const controller = groupRoom;
+  const controllerEpoch = controller?.lifecycleEpoch;
+  let transportEntry = null;
+  let connection = null;
+  let active = null;
+  const context = {
+    roomId: grant.roomId,
+    senderId: grant.senderId,
+    recipientId: grant.recipientId,
+    transferId: grant.transferId,
+  };
+  try {
+    assertGroupTransferControllerCurrent(controller, controllerEpoch, entry, grant.recipientId);
+    if (grant.roomId !== entry.roomId) throw new Error(t("group_status_closed"));
+    transportEntry = controller.getTransport(grant.address);
+    const transport = await transportEntry;
+    try {
+      assertGroupTransferControllerCurrent(controller, controllerEpoch, entry, grant.recipientId);
+    } catch (error) {
+      controller.dropTransport(grant.address, transportEntry);
+      throw error;
+    }
+    try {
+      connection = await transport.dial({ port: APP_CONFIG.ports.voice });
+    } catch (error) {
+      controller.dropTransport(grant.address, transportEntry);
+      throw error;
+    }
+    assertGroupTransferControllerCurrent(controller, controllerEpoch, entry, grant.recipientId);
+    active = {
       connection,
-      maximum,
+      senderId: grant.senderId,
+      recipientId: grant.recipientId,
+      cancelled: false,
+    };
+    entry.connections.add(active);
+    groupTransferConnections.add(active);
+    const reader = new ConnectionReader(connection, VOICE_DECISION_DEADLINE_MS);
+    const mime = safeVoiceMime(entry.blob.type);
+    if (!mime) throw new Error(t("unsupported_capability"));
+    const offer = {
+      type: "VOICE_OFFER",
+      mode: "group",
+      gv: GROUP_PROTOCOL_VERSION,
+      roomId: grant.roomId,
+      senderId: grant.senderId,
+      recipientId: grant.recipientId,
+      transferId: grant.transferId,
+      ticket: grant.ticket,
+      size: entry.blob.size,
+      mime,
+      duration,
+    };
+    setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_pending", "pending");
+    await withConnectionDeadline(
+      connection,
+      connection.write(packGroupVoiceFrame(offer)),
       STREAM_READ_TIMEOUT_MS,
+      "group voice offer write timed out",
+    );
+    const { meta: response, payload: responsePayload } = await withConnectionDeadline(
+      connection,
+      readGroupVoiceFrame(reader, 0),
+      VOICE_DECISION_DEADLINE_MS,
+      "group voice decision timed out",
+    );
+    if (responsePayload.length || !groupVoiceWireMatches(response, context)) {
+      throw new Error("group voice response rejected");
+    }
+    if (response.type !== "VOICE_ACCEPT") {
+      const error = new Error(t("group_transfer_rejected"));
+      if (response.type === "VOICE_REJECT") error.groupTransferStatus = "rejected";
+      throw error;
+    }
+    setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_accepted", "accepted");
+    assertGroupTransferMayStart(entry, grant.recipientId);
+    const payload = new Uint8Array(await entry.blob.arrayBuffer());
+    if (payload.length !== entry.blob.size || entry.cancelled || active.cancelled) {
+      throw new Error(t("voice_discarded"));
+    }
+    setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_sending", "transferring");
+    await withConnectionDeadline(
+      connection,
+      writeChunked(connection, packGroupVoiceFrame({
+        type: "VOICE_DATA",
+        mode: "group",
+        gv: GROUP_PROTOCOL_VERSION,
+        ...context,
+        size: payload.length,
+        mime,
+        duration,
+      }, payload)),
+      VOICE_DATA_DEADLINE_MS,
+      "group voice data write timed out",
+    );
+    await withConnectionDeadline(
+      connection,
+      connection.closeWrite(),
+      STREAM_READ_TIMEOUT_MS,
+      "group voice close write timed out",
+    );
+    const { meta: ack, payload: ackPayload } = await withConnectionDeadline(
+      connection,
+      readGroupVoiceFrame(reader, 0),
+      STREAM_READ_TIMEOUT_MS,
+      "group voice acknowledgement timed out",
+    );
+    if (ackPayload.length
+      || ack.type !== "VOICE_ACK"
+      || !groupVoiceWireMatches(ack, context)) throw new Error("group voice acknowledgement rejected");
+  } finally {
+    if (active) {
+      entry.connections.delete(active);
+      groupTransferConnections.delete(active);
+    }
+    safeConnectionClose(connection);
+  }
+}
+
+function groupVoiceWireMatches(meta, context) {
+  return meta?.v === APP_CONFIG.protocolVersion
+    && meta.mode === "group"
+    && meta.gv === GROUP_PROTOCOL_VERSION
+    && meta.roomId === context.roomId
+    && meta.senderId === context.senderId
+    && meta.recipientId === context.recipientId
+    && meta.transferId === context.transferId;
+}
+
+function groupVoiceWireMeta(context, type, extra = {}) {
+  return {
+    type,
+    mode: "group",
+    gv: GROUP_PROTOCOL_VERSION,
+    roomId: context.roomId,
+    senderId: context.senderId,
+    recipientId: context.recipientId,
+    transferId: context.transferId,
+    ...extra,
+  };
+}
+
+function createIncomingGroupVoiceItem(offer, sender) {
+  const fragment = $("incoming-file-template").content.cloneNode(true);
+  i18n.apply(fragment);
+  const item = fragment.querySelector("li");
+  const name = fragment.querySelector(".transfer-name");
+  const detail = fragment.querySelector(".transfer-detail");
+  const progress = fragment.querySelector("progress");
+  const save = fragment.querySelector(".save-file");
+  const reject = fragment.querySelector(".reject-file");
+  const cancel = fragment.querySelector(".cancel-file");
+  const exportFile = fragment.querySelector(".export-file");
+  const deleteFile = fragment.querySelector(".delete-file");
+  const localNote = fragment.querySelector(".transfer-local-note");
+  item.classList.add("incoming-voice-transfer");
+  name.textContent = format("group_voice_offer", { identity: groupMemberIdentity(sender) });
+  detail.textContent = format("group_voice_offer_detail", {
+    duration: Number(offer.duration).toFixed(1),
+    size: humanSize(offer.size),
+  });
+  save.textContent = t("accept");
+  reject.textContent = t("reject");
+  cancel.classList.add("hidden");
+  exportFile.classList.add("hidden");
+  deleteFile.classList.add("hidden");
+  $("transfer-list").append(fragment);
+  renderTransferCount();
+  return markGroupTransferItem(
+    { item, name, detail, progress, save, reject, cancel, export: exportFile, delete: deleteFile, localNote },
+    offer.roomId,
+  );
+}
+
+function waitForIncomingGroupVoiceDecision(ui, connection, context, active, reader) {
+  return new Promise((resolve) => {
+    let claimed = false;
+    let resolved = false;
+    let timeout = null;
+    const release = () => {
+      clearTimeout(timeout);
+      active.cancelDecision = null;
+    };
+    const claim = () => {
+      if (claimed) return false;
+      claimed = true;
+      ui.save.disabled = true;
+      ui.reject.disabled = true;
+      ui.save.classList.add("hidden");
+      ui.reject.classList.add("hidden");
+      return true;
+    };
+    const finish = (decision) => {
+      if (resolved) return;
+      resolved = true;
+      release();
+      resolve(decision);
+    };
+    const reject = async (reason, label = t("group_transfer_rejected")) => {
+      if (!claim()) return;
+      ui.detail.textContent = label;
+      try {
+        await withConnectionDeadline(
+          connection,
+          connection.write(packGroupVoiceFrame(groupVoiceWireMeta(
+            context,
+            "VOICE_REJECT",
+            { reason },
+          ))),
+          STREAM_READ_TIMEOUT_MS,
+          "group voice rejection write timed out",
+        );
+      } catch (_) {
+        // Closing the stream below is also an unambiguous rejection.
+      } finally {
+        finish({ accepted: false });
+      }
+    };
+    const prefetchedHead = readGroupVoiceFrameHead(reader, APP_CONFIG.limits.voiceBytes);
+    void prefetchedHead.then(({ meta, payloadLength }) => {
+      if (resolved) return;
+      try {
+        if (payloadLength || meta.type !== "VOICE_CANCEL" || !groupVoiceWireMatches(meta, context)) {
+          throw new Error("group voice data arrived before acceptance");
+        }
+        claim();
+        ui.detail.textContent = t("voice_discarded");
+        finish({ accepted: false });
+      } catch (error) {
+        claim();
+        finish({ accepted: false, error });
+      }
+    }, (error) => {
+      if (resolved) return;
+      claim();
+      const remoteClosed = /(?:end of stream|closed)/iu.test(String(error?.message || error));
+      ui.detail.textContent = remoteClosed ? t("voice_discarded") : format("voice_failed", { message: redact(error.message) });
+      finish(remoteClosed ? { accepted: false } : { accepted: false, error });
+    });
+    timeout = setTimeout(
+      () => { void reject("OFFER_TIMEOUT", t("file_cancelled")); },
+      FILE_DECISION_TIMEOUT_MS,
+    );
+    active.cancelDecision = () => { void reject("ROOM_CLOSED", t("file_cancelled")); };
+    ui.save.onclick = async () => {
+      if (!claim()) return;
+      try {
+        await withConnectionDeadline(
+          connection,
+          connection.write(packGroupVoiceFrame(groupVoiceWireMeta(context, "VOICE_ACCEPT"))),
+          STREAM_READ_TIMEOUT_MS,
+          "group voice acceptance write timed out",
+        );
+        ui.detail.textContent = t("group_transfer_accepted");
+        finish({ accepted: true, prefetchedHead });
+      } catch (error) {
+        finish({ accepted: false, error });
+      }
+    };
+    ui.reject.onclick = () => { void reject("USER_REJECTED"); };
+  });
+}
+
+async function receiveGroupVoice(connection, reader, offerDeadlineMs = STREAM_READ_TIMEOUT_MS) {
+  let ui = null;
+  let active = null;
+  let groupController = null;
+  let groupEpoch = 0;
+  let groupGeneration = 0;
+  try {
+    const { meta: offer, payload: offerPayload } = await withConnectionDeadline(
+      connection,
+      readGroupVoiceFrame(reader, 0, { magicRead: true }),
+      Math.max(1, offerDeadlineMs),
+      "group voice offer timed out",
+    );
+    const mime = safeVoiceMime(offer.mime);
+    if (offerPayload.length
+      || offer.type !== "VOICE_OFFER"
+      || offer.v !== APP_CONFIG.protocolVersion
+      || offer.mode !== "group"
+      || offer.gv !== GROUP_PROTOCOL_VERSION
+      || !groupRoom?.active
+      || !/^[0-9a-f]{32}$/u.test(offer.transferId)
+      || !Number.isSafeInteger(offer.size)
+      || offer.size < 0
+      || offer.size > APP_CONFIG.limits.voiceBytes
+      || !mime
+      || !Number.isFinite(offer.duration)
+      || offer.duration < 0
+      || offer.duration > APP_CONFIG.limits.voiceSeconds) throw new Error("group voice offer rejected");
+    groupController = groupRoom;
+    groupEpoch = groupController.lifecycleEpoch;
+    groupGeneration = groupTransferGeneration;
+    const ticket = await groupController.consumeTransferTicket(offer, "voice", offer.size);
+    const context = {
+      roomId: ticket.roomId,
+      senderId: ticket.senderId,
+      recipientId: ticket.recipientId,
+      transferId: ticket.transferId,
+    };
+    if (!groupVoiceWireMatches(offer, context)) throw new Error("group voice ticket context rejected");
+    if (!groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration)) {
+      throw new Error("group voice room changed during ticket validation");
+    }
+    const localPlayableTypes = playableVoiceTypes().map(safeVoiceMime).filter(Boolean);
+    if (!localPlayableTypes.includes(mime)) {
+      await withConnectionDeadline(
+        connection,
+        connection.write(packGroupVoiceFrame(groupVoiceWireMeta(
+          context,
+          "VOICE_REJECT",
+          { reason: "UNSUPPORTED" },
+        ))),
+        STREAM_READ_TIMEOUT_MS,
+        "group voice rejection write timed out",
+      );
+      return;
+    }
+    active = {
+      connection,
+      senderId: ticket.senderId,
+      recipientId: ticket.recipientId,
+      cancelled: false,
+      cancelDecision: null,
+      roomId: context.roomId,
+      generation: groupGeneration,
+    };
+    groupTransferConnections.add(active);
+    const sender = groupMemberById(ticket.senderId);
+    ui = createIncomingGroupVoiceItem(offer, sender);
+    reader.timeoutMs = VOICE_DECISION_DEADLINE_MS;
+    const decision = await waitForIncomingGroupVoiceDecision(ui, connection, context, active, reader);
+    if (decision.error) throw decision.error;
+    if (!decision.accepted) return;
+    if (active.cancelled) throw new Error(t("voice_discarded"));
+    const { meta: data, payload } = await withConnectionDeadline(
+      connection,
+      decision.prefetchedHead.then((head) => readGroupVoiceFramePayload(reader, head)),
+      VOICE_DATA_DEADLINE_MS,
+      "group voice payload timed out",
+    );
+    if (data.type !== "VOICE_DATA"
+      || !groupVoiceWireMatches(data, context)
+      || data.size !== offer.size
+      || data.mime !== mime
+      || data.duration !== offer.duration
+      || payload.length !== offer.size
+      || active.cancelled) throw new Error("group voice payload rejected");
+    const currentSender = groupMemberById(context.senderId);
+    if (!groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration)
+      || !currentSender
+      || active.cancelled) throw new Error("group voice room changed before local commit");
+    const blob = new Blob([payload], { type: mime });
+    addMessage({
+      type: "voice",
+      blob,
+      duration: offer.duration,
+      mine: false,
+      senderName: currentSender.displayName,
+      senderCode: currentSender.code,
+      senderRole: currentSender.role,
+    });
+    ui.progress.value = 1;
+    ui.detail.textContent = t("message_received");
+    setStatus(t("message_received"), "connected");
+    try {
+      await withConnectionDeadline(
+        connection,
+        connection.write(packGroupVoiceFrame(groupVoiceWireMeta(context, "VOICE_ACK"))),
+        STREAM_READ_TIMEOUT_MS,
+        "group voice acknowledgement write timed out",
+      );
+      await withConnectionDeadline(
+        connection,
+        connection.closeWrite(),
+        STREAM_READ_TIMEOUT_MS,
+        "group voice close write timed out",
+      );
+    } catch (error) {
+      // The voice bytes are already committed locally. Preserve them just as
+      // TCF1 preserves a verified file when its terminal confirmation fails.
+      recordGroupError(error);
+      if (groupRoom?.active && groupRoom.roomId === context.roomId) {
+        ui.detail.textContent = t("voice_received_confirmation_unknown");
+        setStatus(t("voice_received_confirmation_unknown"), "error");
+      }
+    }
+  } catch (error) {
+    if (ui) {
+      ui.save.classList.add("hidden");
+      ui.reject.classList.add("hidden");
+      ui.detail.textContent = active?.cancelled
+        ? t("voice_discarded")
+        : format("voice_failed", { message: redact(error.message) });
+    }
+    throw error;
+  } finally {
+    if (active) {
+      active.cancelDecision = null;
+      groupTransferConnections.delete(active);
+    }
+    finishTransferItem(ui);
+  }
+}
+
+async function receiveVoice(connection) {
+  let groupProtocol = false;
+  const startedAt = Date.now();
+  try {
+    const reader = new ConnectionReader(connection);
+    const magic = await withConnectionDeadline(
+      connection,
+      reader.readExact(4),
+      STREAM_READ_TIMEOUT_MS,
+      "voice protocol preamble timed out",
+    );
+    if (equalBytes(magic, TCV_MAGIC)) {
+      groupProtocol = true;
+      await receiveGroupVoice(
+        connection,
+        reader,
+        STREAM_READ_TIMEOUT_MS - (Date.now() - startedAt),
+      );
+      return;
+    }
+    if (!equalBytes(magic, TCH_MAGIC)) throw new Error("invalid voice protocol preamble");
+    const { meta, payload } = await readChatEnvelopeStreamBody(
+      connection,
+      reader,
+      APP_CONFIG.limits.voiceBytes,
       APP_CONFIG.limits.voiceSeconds * 1000 + STREAM_READ_TIMEOUT_MS,
     );
-    const { meta, payload } = unpackChatEnvelope(bytes);
     const mime = safeVoiceMime(meta.mime);
     if (meta.type !== "VOICE"
+      || meta.mode === "group"
       || !hasSession(meta)
       || typeof meta.messageId !== "string"
       || meta.messageId.length !== 32
@@ -2442,13 +5054,20 @@ async function receiveVoice(connection) {
       || meta.duration < 0
       || meta.duration > APP_CONFIG.limits.voiceSeconds) throw new Error("voice message rejected");
     const blob = new Blob([payload], { type: mime });
-    addMessage({ type: "voice", blob, duration: meta.duration, mine: false });
-    await connection.write(packChatEnvelope(sessionMeta("VOICE_ACK", { messageId: meta.messageId })));
+    addMessage({
+      type: "voice",
+      blob,
+      duration: meta.duration,
+      mine: false,
+    });
+    const ack = sessionMeta("VOICE_ACK", { messageId: meta.messageId });
+    await connection.write(packChatEnvelope(ack));
     await connection.closeWrite();
     setStatus(t("message_received"), "connected");
     noteAuthenticatedPeerTraffic();
   } catch (error) {
-    recordError(error);
+    if (groupProtocol) recordGroupError(error);
+    else recordError(error);
   } finally {
     connection.close();
   }
@@ -2854,7 +5473,7 @@ async function endLiveLink(notifyPeer = false, message = "") {
 
 // ---- QR, clipboard, and UI bindings ------------------------------------
 
-function drawInviteQR(value) {
+function drawInviteQR(value, scope = null) {
   const qr = encodeQR(value, { ecc: "M", border: 4 });
   const canvas = $("qr-canvas");
   const scale = Math.max(2, Math.floor(512 / qr.size));
@@ -2869,6 +5488,23 @@ function drawInviteQR(value) {
       if (qr.data[y][x]) context.fillRect(x * scale, y * scale, scale, scale);
     }
   }
+  qrScope = scope;
+}
+
+function clearInviteQR() {
+  const dialog = $("qr-dialog");
+  if (dialog.open) dialog.close();
+  const canvas = $("qr-canvas");
+  canvas.width = 320;
+  canvas.height = 320;
+  canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+  qrScope = null;
+}
+
+function clearGroupInviteQR(roomId = "") {
+  if (qrScope?.mode !== "group") return;
+  if (roomId && qrScope.roomId !== roomId) return;
+  clearInviteQR();
 }
 
 async function copyText(value) {
@@ -2915,6 +5551,120 @@ async function shareInvite() {
   }
 }
 
+async function shareGroupInvite() {
+  const value = groupInviteURL();
+  if (!value) return;
+  if (typeof navigator.share !== "function") {
+    await copyWithFeedback($("group-share-invite-btn"), value, "native_share");
+    return;
+  }
+  try {
+    await navigator.share({ title: "tailcat.app Group Beta", text: t("group_invite_body"), url: value });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    await copyWithFeedback($("group-share-invite-btn"), value, "native_share");
+  }
+}
+
+function updateGroupCreateValidity() {
+  let valid = false;
+  try {
+    normalizeGroupDisplayName($("group-create-nickname").value);
+    valid = true;
+  } catch (_) {}
+  if (support.mobile) valid = valid
+    && APP_CONFIG.mobileGroupHostingEnabled
+    && $("group-mobile-host-confirm").checked;
+  $("group-create-btn").disabled = !valid;
+  showGroupDialogError("group-create-status", support.mobile && !APP_CONFIG.mobileGroupHostingEnabled
+    ? t("group_mobile_hosting_disabled")
+    : "");
+}
+
+function updateGroupJoinValidity() {
+  let valid = false;
+  try {
+    normalizeGroupDisplayName($("group-join-nickname").value);
+    valid = true;
+  } catch (_) {}
+  $("group-join-btn").disabled = !valid;
+  showGroupDialogError("group-join-status", "");
+}
+
+$("group-create-entry-btn")?.addEventListener("click", () => {
+  if (!groupFeatureAvailable()) {
+    setStatus(t("group_rooms_disabled"), "error");
+    return;
+  }
+  $("group-mobile-host-warning").classList.toggle("hidden", !support.mobile);
+  $("group-mobile-host-confirm").checked = false;
+  $("group-create-nickname").value = "";
+  updateGroupCreateValidity();
+  showGroupDialogError("group-create-status", support.mobile && !APP_CONFIG.mobileGroupHostingEnabled
+    ? t("group_mobile_hosting_disabled")
+    : "");
+  $("group-create-dialog").showModal();
+  $("group-create-nickname").focus();
+});
+$("group-create-nickname")?.addEventListener("input", updateGroupCreateValidity);
+$("group-mobile-host-confirm")?.addEventListener("change", updateGroupCreateValidity);
+$("group-create-cancel-btn")?.addEventListener("click", () => {
+  groupCreateOperation += 1;
+  $("group-create-dialog").close();
+});
+$("group-create-btn")?.addEventListener("click", () => void createGroupRoom());
+$("group-create-dialog")?.addEventListener("cancel", () => {
+  groupCreateOperation += 1;
+  showGroupDialogError("group-create-status", "");
+});
+
+$("group-join-nickname")?.addEventListener("input", updateGroupJoinValidity);
+$("group-join-cancel-btn")?.addEventListener("click", () => {
+  groupJoinOperation += 1;
+  pendingGroupInvite = null;
+  $("group-join-dialog").close();
+  setStatus(t("group_request_cancelled"), "ready");
+});
+$("group-join-btn")?.addEventListener("click", () => void requestGroupJoin());
+$("group-join-dialog")?.addEventListener("cancel", () => {
+  groupJoinOperation += 1;
+  pendingGroupInvite = null;
+});
+$("group-waiting-cancel-btn")?.addEventListener("click", () => void groupRoom?.cancelJoin());
+
+$("group-copy-invite-btn")?.addEventListener("click", () => (
+  copyWithFeedback($("group-copy-invite-btn"), groupInviteURL(), "copy_invite")
+));
+$("group-share-invite-btn")?.addEventListener("click", () => void shareGroupInvite());
+$("group-show-qr-btn")?.addEventListener("click", () => {
+  try {
+    drawInviteQR(groupInviteURL(), { mode: "group", roomId: groupRoom?.roomId || "" });
+    $("qr-dialog").showModal();
+  } catch (error) {
+    recordGroupError(error);
+  }
+});
+$("group-pause-joins-btn")?.addEventListener("click", () => {
+  if (groupRoom?.mode === "owner") groupRoom.setJoinsPaused(!groupRoom.joinsPaused);
+});
+$("group-rotate-invite-btn")?.addEventListener("click", async () => {
+  try {
+    await groupRoom?.rotateInvitation();
+    clearGroupInviteQR(groupRoom?.roomId || "");
+    setStatus(t("group_invite_rotated"), "connected");
+  } catch (error) {
+    recordGroupError(error);
+  }
+});
+$("group-close-room-btn")?.addEventListener("click", () => void groupRoom?.close("HOST_CLOSED", { notify: true }));
+$("group-leave-room-btn")?.addEventListener("click", () => void groupRoom?.leave());
+$("group-recipient-all")?.addEventListener("change", (event) => {
+  for (const input of document.querySelectorAll("#group-recipient-list .group-recipient-checkbox:not(:disabled)")) {
+    input.checked = event.currentTarget.checked;
+  }
+  updateGroupRecipientSummary();
+});
+
 $("persist-key").addEventListener("change", () => {
   $("persist-risk").classList.toggle("hidden", !$("persist-key").checked);
 });
@@ -2948,15 +5698,19 @@ document.addEventListener("keydown", (event) => {
 });
 $("show-qr").addEventListener("click", () => {
   try {
-    drawInviteQR(inviteURL(localAddress));
+    drawInviteQR(inviteURL(localAddress), { mode: "private" });
     $("qr-dialog").showModal();
   } catch (error) {
     recordError(error);
     setStatus(format("generic_error", { message: redact(error.message) }), "error");
   }
 });
-$("qr-close").addEventListener("click", () => $("qr-dialog").close());
-$("qr-dialog").addEventListener("click", (event) => { if (event.target === $("qr-dialog")) $("qr-dialog").close(); });
+$("qr-close").addEventListener("click", clearInviteQR);
+$("qr-dialog").addEventListener("click", (event) => { if (event.target === $("qr-dialog")) clearInviteQR(); });
+$("qr-dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  clearInviteQR();
+});
 $("send-text-btn").addEventListener("click", sendText);
 $("send-text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -2980,7 +5734,7 @@ for (const eventName of ["dragenter", "dragover", "dragleave", "drop"]) {
 }
 document.addEventListener("dragenter", () => {
   dragDepth += 1;
-  if (activeSession) $("drop-zone").classList.remove("hidden");
+  if (activeSession || groupRoom?.canSend) $("drop-zone").classList.remove("hidden");
 });
 document.addEventListener("dragleave", () => {
   dragDepth = Math.max(0, dragDepth - 1);
@@ -3022,6 +5776,7 @@ $("media-expand").addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  if (groupRoom?.active) void groupRoom.close(groupRoom.mode === "owner" ? "HOST_CLOSED" : "LEFT", { notify: true });
   listener?.close();
   activeFileTransfer?.connection?.close();
   activeFileTransfer?.entry?.connection?.close();
@@ -3037,6 +5792,7 @@ subscribePageLifecycle({
   pagehide: ({ persisted }) => {
     notePageBackgrounded();
     if (!persisted) {
+      if (groupRoom?.active) void groupRoom.close(groupRoom.mode === "owner" ? "HOST_CLOSED" : "LEFT", { notify: true });
       listener?.close();
       activeFileTransfer?.connection?.close();
       activeFileTransfer?.entry?.connection?.close();
@@ -3046,12 +5802,19 @@ subscribePageLifecycle({
 });
 
 window.addEventListener("hashchange", () => {
-  const address = consumeInviteFragment();
-  if (!address) return;
+  const invite = consumeInviteFragment();
+  if (!invite.address && !invite.group) return;
   if (support.ok) {
-    void connectToPeer(address);
+    if (groupRoom?.active || activeSession || listener) {
+      setStatus(t("status_busy"), "error");
+    } else if (invite.group) {
+      presentGroupInvitation(invite.group);
+    } else {
+      void connectToPeer(invite.address);
+    }
   } else {
-    pendingInviteAddress = address;
+    pendingInviteAddress = invite.address;
+    pendingGroupInvite = invite.group;
     $("blocked-invite-copy").classList.remove("hidden");
   }
 });
@@ -3111,11 +5874,39 @@ async function protocolSelfTest() {
   const digest = await hasher.digestHex();
   hasher.close();
   const expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+  const groupWrites = [];
+  const groupWriter = new GroupFrameWriter({
+    write: async (bytes) => groupWrites.push(bytes.slice()),
+    closeWrite: async () => {},
+    close: () => {},
+  });
+  const groupTestFrame = { type: "PING", gv: 1, roomId: "A".repeat(22), pingId: "B".repeat(22) };
+  await groupWriter.send(groupTestFrame);
+  const groupWire = concatBytes(...groupWrites);
+  const groupPieces = Array.from(groupWire, (byte) => new Uint8Array([byte]));
+  const groupReader = new GroupFrameReader({ read: async () => groupPieces.shift() || null });
+  const decodedGroupFrame = await groupReader.read();
+  const groupURL = makeGroupInviteURL(invitationOrigin(), {
+    address: `tc${"a".repeat(64)}`,
+    roomId: "A".repeat(22),
+    joinToken: "B".repeat(43),
+  });
+  const parsedGroup = parseGroupInviteFragment(new URL(groupURL).hash.slice(1), { validAddress });
+  let rejectedOversizedBatch = false;
+  try {
+    groupBatchBytes([{ size: 512 * 1024 * 1024 + 1 }], 2, APP_CONFIG.group.maxBatchBytes);
+  } catch (_) {
+    rejectedOversizedBatch = true;
+  }
   const results = {
     fragment: inviteURL(`tc${"a".repeat(64)}`).includes("#v=1&invite=") && location.hash === "",
     "frame-boundaries": equalBytes(magic, TCF_MAGIC) && data.payload.length === 3 && data.payload[2] === 99 && decodedOffer.name === "safe.txt" && final.size === 3,
     "file-name": sanitizeFileName("../bad\\name\u0000.txt") === "name.txt",
     "file-sizes": validFileSize(APP_CONFIG.limits.fileBytes) && !validFileSize(APP_CONFIG.limits.fileBytes + 1),
+    "private-file-auto-boundary": APP_CONFIG.limits.privateFileAutoReceiveBytes === 100 * 1024 * 1024
+      && APP_CONFIG.limits.privateFileAutoReceiveBytes < APP_CONFIG.limits.fileBytes
+      && APP_CONFIG.limits.privateFileAutoReceiveSessionBytes === 500 * 1024 * 1024
+      && APP_CONFIG.limits.privateFileAutoReceiveSessionItems === 20,
     "voice-mime": safeVoiceMime(" AUDIO/WEBM ; CODECS=\"OPUS\" ") === "audio/webm;codecs=opus"
       && safeVoiceMime("audio/mp4;codecs=mp4a.40.2") === "audio/mp4;codecs=mp4a.40.2"
       && safeVoiceMime("audio/webm;codecs=vorbis") === ""
@@ -3132,6 +5923,13 @@ async function protocolSelfTest() {
     sha256: digest === expected && data.payload.length === 3,
     "session-lock": sessionMatches({ v: APP_CONFIG.protocolVersion, session }, session)
       && !sessionMatches({ v: APP_CONFIG.protocolVersion, session: "2".repeat(32) }, session),
+    "group-frame": decodedGroupFrame.type === groupTestFrame.type
+      && decodedGroupFrame.pingId === groupTestFrame.pingId,
+    "group-invite": parsedGroup?.roomId === "A".repeat(22)
+      && parsedGroup?.joinToken === "B".repeat(43),
+    "group-batch": groupBatchBytes([{ size: 512 * 1024 * 1024 }], 2, APP_CONFIG.group.maxBatchBytes)
+      === APP_CONFIG.group.maxBatchBytes
+      && rejectedOversizedBatch,
   };
   const checks = Object.keys(results);
   const result = {
@@ -3144,8 +5942,37 @@ async function protocolSelfTest() {
   return result;
 }
 
+async function groupVoiceDeadlineSelfTest() {
+  const wire = packGroupVoiceFrame({ type: "VOICE_OFFER", mode: "group", gv: 1, roomId: "A".repeat(22) });
+  const pieces = Array.from(wire, (byte) => new Uint8Array([byte]));
+  let closed = false;
+  let reads = 0;
+  const connection = {
+    async read() {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return pieces.shift() || null;
+    },
+    close() { closed = true; },
+  };
+  const reader = new ConnectionReader(connection, 1_000);
+  let error = "";
+  try {
+    await withConnectionDeadline(
+      connection,
+      readGroupVoiceFrame(reader, 0),
+      25,
+      "group voice absolute deadline reached",
+    );
+  } catch (caught) {
+    error = String(caught?.message || caught);
+  }
+  return { closed, reads, error };
+}
+
 tcTest.runProtocolSelfTests = protocolSelfTest;
 tcTest.runProtocolSelfTest = protocolSelfTest;
+tcTest.runGroupVoiceDeadlineSelfTest = groupVoiceDeadlineSelfTest;
 
 async function bootstrap() {
   $("app").setAttribute("aria-busy", "true");
@@ -3153,6 +5980,7 @@ async function bootstrap() {
   await loadRememberedKey();
   if (!APP_CONFIG.roomsEnabled) {
     pendingInviteAddress = "";
+    pendingGroupInvite = null;
     tcTest.ready = false;
     tcTest.state.transport = "maintenance";
     $("app").setAttribute("aria-busy", "false");
@@ -3170,8 +5998,13 @@ async function bootstrap() {
   $("listen-btn").disabled = false;
   $("connect-btn").disabled = false;
   renderConnectionState();
+  if (groupFeatureAvailable()) renderGroupState(ensureGroupRoom().snapshot());
+  else tcTest.group = { enabled: false, mode: "none", members: 0, online: 0, pending: 0, sequence: 0, paused: false };
   await protocolSelfTest();
-  if (pendingInviteAddress) {
+  if (pendingGroupInvite) {
+    const invite = pendingGroupInvite;
+    presentGroupInvitation(invite);
+  } else if (pendingInviteAddress) {
     const address = pendingInviteAddress;
     pendingInviteAddress = "";
     $("send-addr").value = address;

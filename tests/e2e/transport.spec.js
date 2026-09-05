@@ -61,6 +61,150 @@ test("locks a room after HELLO and carries text in both directions", async ({ br
   }
 });
 
+test("renders private text immediately and preserves a new draft until the acknowledgement arrives", async ({ browser }) => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const namespace = randomUUID();
+  try {
+    const receiver = await openMockPage(context, namespace);
+    const sender = await openMockPage(context, namespace);
+    const address = await startMockRoom(receiver);
+    await connectMockPeer(sender, address);
+
+    await receiver.evaluate(() => globalThis.__mockTailcat.holdNextWrite({
+      port: 101,
+      direction: "inbound",
+      frameType: "TEXT_ACK",
+    }));
+    const text = "optimistic private message";
+    const reply = "reply received before the first acknowledgement";
+    const laterDraft = "draft typed while the first acknowledgement is pending";
+    await sender.locator("#send-text").fill(text);
+    await sender.locator("#send-text-btn").click();
+    await expect(sender.locator("#send-text-btn")).toHaveAttribute("data-feedback", "queued");
+    await expect(sender.locator("#send-text-btn")).toBeEnabled();
+
+    const optimistic = sender.locator(".message.mine", { hasText: text });
+    await expect(optimistic).toHaveCount(1);
+    await expect(optimistic).toHaveAttribute("data-delivery-state", "sending");
+    await expect(optimistic.locator(".message-delivery-status")).toContainText(/sending/iu);
+    await expect(sender.locator("#send-text")).toHaveValue("");
+    await expect(sender.locator("#send-text")).toBeEnabled();
+    await expect(receiver.locator(".message:not(.mine):not(.system) .bubble", { hasText: text })).toHaveText(text);
+    await expect.poll(() => receiver.evaluate(() => globalThis.__mockTailcat.snapshot().heldWrites)).toEqual([{
+      port: 101,
+      direction: "inbound",
+      frameType: "TEXT_ACK",
+      eventType: "",
+    }]);
+
+    await sender.locator("#send-text").fill(laterDraft);
+    await receiver.locator("#send-text").fill(reply);
+    await receiver.locator("#send-text-btn").click();
+    await expect(receiver.locator(".message.mine", { hasText: reply })).toHaveAttribute("data-delivery-state", "delivered");
+    await expect(sender.locator("#history .message:not(.system) .bubble")).toHaveText([text, reply]);
+    await expect(sender.locator("#send-text")).toHaveValue(laterDraft);
+
+    expect(await receiver.evaluate(() => globalThis.__mockTailcat.releaseHeldWrites())).toBe(1);
+    await expect(optimistic).toHaveAttribute("data-delivery-state", "delivered");
+    await expect(optimistic.locator(".message-delivery-status")).toContainText(/delivered/iu);
+    await expect(sender.locator("#send-text")).toHaveValue(laterDraft);
+    await expect(sender.locator(".message.mine", { hasText: text })).toHaveCount(1);
+    await expect(sender.locator("#history .message:not(.system) .bubble")).toHaveText([text, reply]);
+  } finally {
+    await context.close();
+  }
+});
+
+test("keeps a private optimistic message visible when its acknowledgement fails", async ({ browser }) => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const namespace = randomUUID();
+  try {
+    const receiver = await openMockPage(context, namespace);
+    const sender = await openMockPage(context, namespace);
+    const address = await startMockRoom(receiver);
+    await connectMockPeer(sender, address);
+
+    await receiver.evaluate(() => globalThis.__mockTailcat.holdNextWrite({
+      port: 101,
+      direction: "inbound",
+      frameType: "TEXT_ACK",
+    }));
+    const text = "private acknowledgement failure";
+    await sender.locator("#send-text").fill(text);
+    await sender.locator("#send-text-btn").click();
+
+    const optimistic = sender.locator(".message.mine", { hasText: text });
+    await expect(optimistic).toHaveCount(1);
+    await expect(optimistic).toHaveAttribute("data-delivery-state", "sending");
+    await expect.poll(() => receiver.evaluate(() => globalThis.__mockTailcat.snapshot().heldWrites.length)).toBe(1);
+    expect(await receiver.evaluate(() => globalThis.__mockTailcat.rejectHeldWrites("injected text acknowledgement failure"))).toBe(1);
+
+    await expect(optimistic).toHaveAttribute("data-delivery-state", "failed");
+    await expect(optimistic.locator(".message-delivery-status")).toContainText(/failed|not delivered/iu);
+    await expect(sender.locator("#send-text")).toBeEnabled();
+    await expect(sender.locator("#send-text-btn")).toBeEnabled();
+    await expect(sender.locator(".message.mine", { hasText: text })).toHaveCount(1);
+    await expect(receiver.locator(".message:not(.mine):not(.system) .bubble", { hasText: text })).toHaveCount(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a stalled old-session acknowledgement cannot block text in a replacement room", async ({ browser }) => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const namespace = randomUUID();
+  try {
+    const oldReceiver = await openMockPage(context, namespace);
+    const newReceiver = await openMockPage(context, namespace);
+    const sender = await openMockPage(context, namespace);
+    const oldAddress = await startMockRoom(oldReceiver);
+    const newAddress = await startMockRoom(newReceiver);
+    await connectMockPeer(sender, oldAddress);
+    const errorsBefore = await sender.evaluate(() => [...globalThis.tcTest.errors]);
+
+    await oldReceiver.evaluate(() => globalThis.__mockTailcat.holdNextWrite({
+      port: 101,
+      direction: "inbound",
+      frameType: "TEXT_ACK",
+    }));
+    const oldText = "stalled text from the old room";
+    await sender.locator("#send-text").fill(oldText);
+    await sender.locator("#send-text-btn").click();
+    const oldMessage = sender.locator(".message.mine", { hasText: oldText });
+    await expect(oldMessage).toHaveAttribute("data-delivery-state", "sending");
+    await expect.poll(() => oldReceiver.evaluate(() => globalThis.__mockTailcat.snapshot().heldWrites.length)).toBe(1);
+
+    await oldReceiver.locator("#stop-listen-btn").click();
+    await expect.poll(() => sender.evaluate(() => globalThis.tcTest.state.peer)).toBe("none");
+    await expect(oldMessage).toHaveAttribute("data-delivery-state", "failed");
+
+    await connectMockPeer(sender, newAddress);
+    const newText = "replacement-room text must not wait for the old ACK";
+    await sender.locator("#send-text").fill(newText);
+    await sender.locator("#send-text-btn").click();
+    const newMessage = sender.locator(".message.mine", { hasText: newText });
+    await expect(newMessage).toHaveAttribute("data-delivery-state", "delivered");
+    await expect(newReceiver.locator(".message:not(.mine):not(.system) .bubble", { hasText: newText })).toHaveCount(1);
+    await expect.poll(() => oldReceiver.evaluate(() => globalThis.__mockTailcat.snapshot().heldWrites.length)).toBe(1);
+    const replacementStatus = await sender.locator("#status").textContent();
+
+    expect(await oldReceiver.evaluate(() => globalThis.__mockTailcat.releaseHeldWrites())).toBe(1);
+    await expect.poll(() => sender.evaluate(() => {
+      const writes = globalThis.__mockTailcat.snapshot().records
+        .filter(({ direction, port }) => direction === "outbound" && port === 101);
+      return writes.length === 2 && writes.every(({ closed }) => closed);
+    })).toBe(true);
+    await expect(oldMessage).toHaveAttribute("data-delivery-state", /failed|delivered/u);
+    await expect(newMessage).toHaveAttribute("data-delivery-state", "delivered");
+    await expect(sender.locator("#status")).toHaveText(replacementStatus || "");
+    expect(await sender.evaluate(() => globalThis.tcTest.state.peer)).toBe("connected");
+    expect(await sender.evaluate(() => [...globalThis.tcTest.errors])).toEqual(errorsBefore);
+    await expect(newReceiver.locator(".message:not(.mine):not(.system) .bubble", { hasText: oldText })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 test("keeps temporary addresses ephemeral and remembered addresses stable", async ({ browser }) => {
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
@@ -97,11 +241,11 @@ test("keeps temporary addresses ephemeral and remembered addresses stable", asyn
   }
 });
 
-test("requires a save decision and streams a 64 KiB + 1 file in two data chunks", async ({ browser }) => {
+test("uses the manual picker when OPFS is unavailable and streams a 64 KiB + 1 file in two data chunks", async ({ browser }) => {
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -157,13 +301,13 @@ test("requires a save decision and streams a 64 KiB + 1 file in two data chunks"
   }
 });
 
-test("streams 0 B, 1 B, 64 KiB, and 100 MiB boundaries without whole-file fallback", async ({ browser }) => {
+test("the manual picker streams 0 B, 1 B, 64 KiB, and 100 MiB boundaries without whole-file fallback", async ({ browser }) => {
   test.setTimeout(300_000);
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "tailcat-e2e-"));
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -208,7 +352,7 @@ test("aborts the destination when the streamed file hash is corrupted", async ({
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -240,7 +384,7 @@ test("continues the ordered file queue after one item is rejected", async ({ bro
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);

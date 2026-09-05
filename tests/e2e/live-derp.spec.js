@@ -1,5 +1,4 @@
 import { expect, test } from "@playwright/test";
-import { installMockSavePicker } from "./mock-tailcat.js";
 
 test("exchanges text and a verified file through the live Tokyo DERP relay", async ({ browser }) => {
   test.skip(process.env.LIVE_DERP !== "1", "live public-relay smoke test is opt-in");
@@ -7,13 +6,15 @@ test("exchanges text and a verified file through the live Tokyo DERP relay", asy
   const context = await browser.newContext({ locale: "en-US" });
   try {
     const host = await context.newPage();
+    await host.goto("/");
+    await host.waitForFunction(() => globalThis.tcTest?.ready === true);
     const guest = await context.newPage();
-    await Promise.all([host.goto("/"), guest.goto("/")]);
-    await Promise.all([
-      host.waitForFunction(() => globalThis.tcTest?.ready === true),
-      guest.waitForFunction(() => globalThis.tcTest?.ready === true),
-    ]);
-    await installMockSavePicker(host);
+    await guest.goto("/");
+    await guest.waitForFunction(() => globalThis.tcTest?.ready === true);
+    expect(await host.evaluate(() => globalThis.tcTest.runtime.fileSink)).toMatchObject({
+      kind: "opfs-export",
+      opfs: true,
+    });
 
     await host.locator("#region-select").selectOption("tok");
     await host.locator("#listen-btn").click();
@@ -39,13 +40,10 @@ test("exchanges text and a verified file through the live Tokyo DERP relay", asy
     });
     const offer = host.locator(".incoming-transfer", { hasText: "live-one-byte.bin" });
     await expect(offer).toBeVisible({ timeout: 90_000 });
-    await offer.locator(".save-file").click();
     await expect(guest.locator(".transfer-item", { hasText: "live-one-byte.bin" })).toContainText(/received and SHA-256 verified/i, { timeout: 90_000 });
-    expect(await host.evaluate(() => globalThis.__mockSave)).toEqual(expect.objectContaining({
-      totalBytes: 1,
-      closed: true,
-      aborted: false,
-    }));
+    await expect(offer.locator(".save-file")).toBeHidden();
+    await expect(offer.locator(".export-file")).toBeVisible();
+    expect(await host.evaluate(() => globalThis.tcTest.recvBytes)).toBe(1);
   } finally {
     await context.close();
   }

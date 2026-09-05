@@ -24,9 +24,9 @@
   <main class="legal-page">
     <p class="eyebrow">Public beta · 公开测试</p>
     <h1>可接受使用政策 / Acceptable Use Policy</h1>
-    <p class="lede">tailcat.app 只应用于合法、自愿、低风险的一对一传输。请尊重他人、网络和公共中继资源。</p>
-    <p class="lede" lang="en">tailcat.app is for lawful, consensual, low-risk one-to-one transfers. Respect other people, networks, and shared relay capacity.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-01</p>
+    <p class="lede">tailcat.app 只应用于合法、自愿、低风险的一对一或临时多人传输。请尊重其他参与者、网络和公共中继资源。</p>
+    <p class="lede" lang="en">tailcat.app is for lawful, consensual, low-risk private or temporary group transfers. Respect other participants, networks, and shared relay capacity.</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-04</p>
 
     <div class="notice">
       <p>举报滥用 / Report abuse: <a href="mailto:abuse@tailcat.app">abuse@tailcat.app</a>. 请勿发送私钥、完整邀请链接、非法内容副本或不必要的个人数据。Do not email private keys, full invitation links, copies of illegal content, or unnecessary personal data.</p>
@@ -57,17 +57,19 @@
           <li>自动化批量传输、压力测试、挖矿、代理转售、商业中继或任何消耗不成比例资源的用途；</li>
           <li>绕过文件大小、速率、并发、浏览器兼容或其他技术限制；</li>
           <li>把服务用于紧急通信、生命安全、医疗诊断、关键基础设施控制、受监管记录归档或其他失败会造成严重伤害的高风险场景；</li>
+          <li>利用多人昵称可重名的特性冒充他人，滥用加入申请，或在被移除后反复申请以骚扰房主或成员；</li>
           <li>帮助他人实施上述行为，或反复连接不愿与你通信的人。</li>
         </ul>
 
         <h2>4. 文件与安全责任</h2>
-        <p>本站不查看、审核或病毒扫描端到端加密内容。加密不代表文件安全或发送者可信。发送者必须拥有合法权限；接收者必须在确认来源后主动同意保存，并自行使用本地安全工具检查。</p>
+        <p>本站运营方不查看、审核或病毒扫描传输内容。多人群聊文字会由可信房主浏览器读取和协调，但不会因此接受本站审核。链路加密不代表文件安全、昵称真实或发送者可信。发送者必须拥有合法权限。私人一对一房间中，不超过 100 MiB 的文件可能在具备安全 OPFS 暂存与足够容量时自动接收；每个已认证会话最多自动接收 20 个文件、累计 500 MiB，零字节也计一件，达到任一上限后本会话改为手动确认，新会话重置。应用不会自动打开、预览或扫描文件，这也不代表接收者同意使用或信任文件，接收者仍应在打开、保存或分享前确认来源并用本地安全工具检查。超过 100 MiB、无法安全暂存以及所有多人文件仍须接收者主动确认；多人语音留言也只有在所选接收者逐一接受后才会向其发送音频内容。</p>
 
         <h2>5. 公平使用公共资源</h2>
-        <p>公共 Tailcat DERP 限速且无 SLA。不得持续占用连接、拆分文件逃避限制、制造无效流量或影响其他用户。单文件、消息、语音时长和并发限制属于服务边界，并可能在测试期间调整。</p>
+        <p>公共 Tailcat DERP 限速、尽力而为且没有可用性或吞吐量 SLA。不得持续占用连接、拆分文件逃避限制、制造无效流量或影响其他用户。多人房间最多 10 人；群组文件按“文件大小 × 所选接收人数”合计每批最多 1 GiB，同时最多向两位接收者传输。不得通过多房间、重复邀请或自动重连规避人数、批量、速率、消息、语音时长或并发限制。</p>
+        <p>手机房主必须保持页面在前台并让屏幕持续开启；唤醒锁可能失败，切换应用或锁屏会暂停房间，超过 120 秒将为所有人关闭房间。不得依赖手机房主承担关键或高风险通信。</p>
 
         <h2>6. 举报与处理</h2>
-        <p>举报时请提供可验证的时间、行为描述、受影响方和必要的非敏感技术信息。由于服务无账号、无内容数据库且内容端到端加密，我们可能无法读取内容、识别用户或恢复历史。我们仍可在技术上可行和适当时限制访问、关闭功能、保留必要证据或回应有效法律要求。</p>
+        <p>举报时请提供可验证的时间、行为描述、受影响方和必要的非敏感技术信息。由于服务无账号、无内容数据库和云端历史，本站运营方通常无法读取传输内容、识别用户或恢复历史；多人房主能看到群聊文字不代表运营方能看到。我们仍可在技术上可行和适当时限制访问、关闭功能、保留必要证据或回应有效法律要求。</p>
         <p>如有人面临紧迫危险，请联系当地紧急服务；不要依赖本项目处理紧急事件。</p>
 
         <h2>7. 善意安全研究</h2>
@@ -98,17 +100,19 @@
           <li>Automated bulk transfers, stress testing, mining, proxy resale, commercial relaying, or any use that consumes disproportionate resources;</li>
           <li>Circumventing file-size, rate, concurrency, browser-support, or other technical limits;</li>
           <li>Using the service for emergency communications, life safety, medical diagnosis, critical infrastructure control, regulated records retention, or another high-risk purpose where failure could cause serious harm; or</li>
+          <li>Using duplicate-capable group nicknames to impersonate someone, abusing join requests, or repeatedly reapplying after removal to harass a host or members; or</li>
           <li>Helping others do any of the above, or repeatedly connecting to someone who does not want to communicate with you.</li>
         </ul>
 
         <h2>4. File and security responsibility</h2>
-        <p>The site does not inspect, moderate, or malware-scan end-to-end encrypted content. Encryption does not make a file safe or a sender trustworthy. Senders must have lawful authority; recipients must explicitly approve saving a file after confirming its source and must inspect it with local security tools.</p>
+        <p>The site operator does not inspect, moderate, or malware-scan transferred content. A trusted group host browser reads and coordinates group text, but the site still does not moderate it. Link encryption does not make a file safe, a nickname genuine, or a sender trustworthy. Senders must have lawful authority. In a private one-to-one room, a file up to and including 100 MiB may be received automatically when safe OPFS staging and sufficient capacity are available. Each authenticated session can auto-receive at most 20 files and 500 MiB in total; a zero-byte file counts as one, reaching either limit makes that session manual, and a new session resets the counters. The app never automatically opens, previews, or scans it; automatic receive is not consent to use or trust it, and the recipient must still confirm its source and inspect it locally before opening, saving, or sharing. A file over 100 MiB, one that cannot be staged safely, and every group file still require recipient approval. A Group Beta voice note likewise sends audio bytes to a selected recipient only after that recipient accepts.</p>
 
         <h2>5. Fair use of shared resources</h2>
-        <p>Public Tailcat DERP relays are rate-limited and have no SLA. Do not hold connections open unnecessarily, split files to evade limits, generate useless traffic, or impair other users. File, message, voice-duration, and concurrency limits are service boundaries and may change during beta.</p>
+        <p>Public Tailcat DERP relays are rate-limited, best-effort, and have no uptime or throughput SLA. Do not hold connections open unnecessarily, split files to evade limits, generate useless traffic, or impair other users. A group is limited to 10 people; each file batch is limited to 1 GiB after multiplying file size by selected recipients, with at most two recipient transfers active at once. Do not use multiple rooms, repeated invitations, or automated reconnects to evade member, batch, rate, message, voice-duration, or concurrency limits.</p>
+        <p>A mobile host must keep the page in the foreground and the screen awake. The wake lock can fail; switching apps or locking the device pauses the room, and staying away for more than 120 seconds closes it for everyone. Do not rely on a mobile host for critical or high-risk communication.</p>
 
         <h2>6. Reports and response</h2>
-        <p>A report should include a verifiable time, description, affected party, and only the non-sensitive technical information needed. Because the service has no accounts or content database and content is end-to-end encrypted, we may be unable to read content, identify a user, or recover history. Where technically feasible and appropriate, we may still restrict access, disable features, preserve necessary evidence, or respond to valid legal process.</p>
+        <p>A report should include a verifiable time, description, affected party, and only the non-sensitive technical information needed. Because the service has no accounts, content database, or cloud history, the site operator is generally unable to read transferred content, identify a user, or recover history; a group host's ability to see group text does not give the operator that access. Where technically feasible and appropriate, we may still restrict access, disable features, preserve necessary evidence, or respond to valid legal process.</p>
         <p>If someone is in immediate danger, contact local emergency services; do not rely on this project for emergency response.</p>
 
         <h2>7. Good-faith security research</h2>

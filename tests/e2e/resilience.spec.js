@@ -45,11 +45,11 @@ test("rejects an incompatible handshake and fails closed when the relay peer is 
   }
 });
 
-test("rejects a cancelled save picker and aborts on a disk write failure", async ({ browser }) => {
+test("rejects a cancelled fallback picker and aborts on a fallback disk write failure", async ({ browser }) => {
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -88,7 +88,7 @@ test("aborts a partial destination when the sender page closes", async ({ browse
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -115,7 +115,7 @@ test("does not report success when the receiver page closes mid-transfer", async
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -142,7 +142,7 @@ test("cancels an active file stream and discards the partial destination", async
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -171,7 +171,7 @@ test("lets the receiver cancel an active file stream", async ({ browser }) => {
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
@@ -295,7 +295,7 @@ test("bounds one bulk file selection to one hundred pending items", async ({ bro
   const context = await browser.newContext({ locale: "en-US" });
   const namespace = randomUUID();
   try {
-    const receiver = await openMockPage(context, namespace);
+    const receiver = await openMockPage(context, namespace, { disableOPFS: true });
     const sender = await openMockPage(context, namespace);
     await installMockSavePicker(receiver);
     const address = await startMockRoom(receiver);
