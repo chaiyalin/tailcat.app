@@ -1,9 +1,10 @@
 {
   "name": "tailcat-app",
-  "version": "0.3.0-beta.1",
+  "version": "0.4.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
+    "test:unit": "node --test tests/unit/*.test.js",
     "test:e2e": "PAGES_BUILD=1 ./build.sh dist && playwright test"
   },
   "devDependencies": {

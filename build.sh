@@ -24,7 +24,8 @@ cp LICENSE THIRD_PARTY_NOTICES.md "$out/"
 group_rooms_enabled="${TAILCAT_GROUP_ROOMS_ENABLED:-0}"
 mobile_group_hosting_enabled="${TAILCAT_MOBILE_GROUP_HOSTING_ENABLED:-0}"
 preview_invites_enabled="${TAILCAT_PREVIEW_INVITES:-0}"
-for release_switch in "$group_rooms_enabled" "$mobile_group_hosting_enabled" "$preview_invites_enabled"; do
+native_files_enabled="${TAILCAT_NATIVE_FILES_ENABLED:-0}"
+for release_switch in "$group_rooms_enabled" "$mobile_group_hosting_enabled" "$preview_invites_enabled" "$native_files_enabled"; do
   if [[ "$release_switch" != "0" && "$release_switch" != "1" ]]; then
     echo "Tailcat release switches must be 0 or 1" >&2
     exit 2
@@ -37,6 +38,13 @@ fi
 group_rooms_js=false
 mobile_group_hosting_js=false
 preview_invites_js=false
+native_files_js=false
+source_sha="$(git rev-parse HEAD)"
+if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "a verifiable Git source SHA is required" >&2
+  exit 2
+fi
+if [[ "$native_files_enabled" == "1" ]]; then native_files_js=true; fi
 if [[ "$group_rooms_enabled" == "1" ]]; then group_rooms_js=true; fi
 if [[ "$mobile_group_hosting_enabled" == "1" ]]; then mobile_group_hosting_js=true; fi
 if [[ "$preview_invites_enabled" == "1" ]]; then preview_invites_js=true; fi
@@ -45,6 +53,8 @@ printf '%s\n' \
   "globalThis.__TAILCAT_GROUP_BETA__ ??= $group_rooms_js;" \
   "globalThis.__TAILCAT_MOBILE_GROUP_HOSTING__ ??= $mobile_group_hosting_js;" \
   "globalThis.__TAILCAT_PREVIEW_INVITES__ ??= $preview_invites_js;" \
+  "globalThis.__TAILCAT_NATIVE_FILES__ ??= $native_files_js;" \
+  "globalThis.__TAILCAT_SOURCE_SHA__ = '$source_sha';" \
   > "$out/runtime-config.js"
 
 GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o "$out/main.wasm" .
@@ -66,4 +76,5 @@ if [[ "${PAGES_BUILD:-}" == "1" ]]; then
   rm -- "$out/main.wasm"
 fi
 
+node scripts/build-manifest.mjs "$out"
 echo "tailcat.app distribution written to $out/"

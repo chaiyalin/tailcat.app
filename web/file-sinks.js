@@ -655,6 +655,27 @@ class BaseFileSink {
   }
 }
 
+// Only an uncommitted, joined attempt may be reset. OPFS gets a fresh random
+// local path; picker keeps its original transaction and user-selected handle.
+export async function resetFileSink(sink, transferId) {
+  await sink.tail;
+  sink.assertOpen();
+  if (sink.kind === FILE_SINK_KIND.PICKER) {
+    return sink.enqueue(async () => {
+      sink.assertOpen();
+      try {
+        await sink.writable.truncate(0);
+        await sink.writable.seek(0);
+        sink.bytesWritten = 0;
+        return sink;
+      } catch (error) { return sink.fail(error); }
+    });
+  }
+  const options = { kind: sink.kind, transferId, name: sink.name, size: sink.size, mime: sink.mime };
+  await sink.abort();
+  return createFileSink(options);
+}
+
 class PickerFileSink extends BaseFileSink {
   constructor(options, handle, writable) {
     super({ ...options, kind: FILE_SINK_KIND.PICKER });

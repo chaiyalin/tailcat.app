@@ -26,7 +26,7 @@
     <h1>隐私说明 / Privacy notice</h1>
     <p class="lede">我们尽量不收集数据，但“端到端加密”不等于没有网络元数据。本页说明浏览器、Cloudflare、Tailcat DERP 与 WebRTC 各自会处理什么。</p>
     <p class="lede" lang="en">We try to collect as little data as possible, but end-to-end encryption does not eliminate network metadata. This notice explains what the browser, Cloudflare, Tailcat DERP, and WebRTC each process.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-04</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-05</p>
 
     <div class="facts" aria-label="Key privacy facts">
       <div class="fact"><strong>无账号 / No accounts</strong><span>无需注册、登录或提供用户资料。</span></div>
@@ -36,7 +36,7 @@
     </div>
 
     <div class="notice warning">
-      <p><strong>重要 / Important：</strong>一对一内容和最多 10 人的多人房间中每条网络链路均通过 WireGuard 加密，但多人群聊文字由可信房主协调并对房主可见。群组文件和语音留言只点对点发送给所选接收者。公共 DERP 中继仍可看到连接 IP、时间、所选区域和大致流量，且不提供 SLA。</p>
+      <p><strong>重要 / Important：</strong>Tailcat 控制及中继文件使用 WireGuard；启用原生文件直传时，文件正文使用 WebRTC DTLS，双方可能获知彼此公网 IP。多人群聊文字对可信房主可见，群组文件和语音留言仅发给所选接收者。公共 DERP 可观察中继连接元数据，且无 SLA。</p>
     </div>
 
     <div class="language-grid">
@@ -55,7 +55,8 @@
         <p>一对一地址以及多人房间的临时房间编号和加入令牌放在 URL 的 <code>#fragment</code> 中。片段不会随常规 HTTP 请求发送给 Cloudflare Pages；应用会在读取邀请后立即从地址栏移除片段。但它在被移除前仍可能出现在浏览器历史、剪贴板、浏览器扩展、同步功能、截图或屏幕共享中。房主轮换多人邀请后，旧加入令牌失效，但已加入成员不会因此断开。</p>
 
         <h2>4. Tailcat 传输</h2>
-        <p>一对一房间的文字、文件、语音留言以及通话信令通过 Tailcat 连接传输，并由 WireGuard 在通信双方之间端到端加密。多人房间中，每位成员与房主之间的控制和文字链路均加密，但群聊文字由房主排序、转发并可被房主读取；这不是对房主隐藏内容的群组端到端加密。多人文件和语音留言不经过房主浏览器，而是通过加密 Tailcat 链路直接发送给发送者选定的接收者。</p>
+        <p>文字、语音留言、控制和文件中继通道使用 Tailcat WireGuard。启用原生文件直传且双方支持时，文件正文优先使用可靠 WebRTC DataChannel 的 DTLS 加密，不经过 Go 网络栈；无法直连则使用 Tailcat/DERP。文件哈希仍通过逐块 JS/WASM 复制计算，并非零复制。群聊文字由可信房主读取、排序和转发；群组文件正文不经过房主浏览器。</p>
+        <p>文件直传也可能向对端暴露公网 IP，不申请摄像头或麦克风权限。中断后先查询保存结果，至多自动从头中继重传一次，不续传；无法确认时显示结果未确认，不自动创建第二份文件。未完成的 OPFS 文件先删除再用新随机名称创建；文件选择器重置未提交事务。已校验提交的文件不因回执丢失删除。完成回执只在会话内存保存，最多 256 条、30 分钟，结束房间即清除。</p>
         <p>多人房主可看到昵称、随机成员短码、成员关系、群聊文字、文件大小和所选接收者，但不通过协调协议获得点对点文件名、语音内容或文件内容。任何实际接收者仍可保存、复制或转发其收到的内容。</p>
         <p>浏览器版目前使用公共 Tailcat DERP 中继。中继无法读取其承载的加密内容，但会处理或观察通信端点 IP、连接时间、DERP 区域、数据量与流量模式等元数据。公共 DERP 限速、尽力而为且没有可用性或吞吐量 SLA；中继运营方可能依其自身政策保存运行与滥用防护日志。请勿把“链路加密”理解为匿名服务。</p>
 
@@ -94,7 +95,8 @@
         <p>A private-room address, or a group room's temporary identifier and join token, is placed in the URL <code>#fragment</code>. A fragment is not sent in an ordinary HTTP request to Cloudflare Pages, and the app removes it from the address bar immediately after reading it. Before removal, it may still be exposed through browser history, the clipboard, extensions, sync features, screenshots, or screen sharing. Rotating a group invitation invalidates its old join token without disconnecting current members.</p>
 
         <h2>4. Tailcat transfers</h2>
-        <p>In a private room, text, files, voice notes, and call signaling travel over Tailcat connections and are end-to-end encrypted between the two peers with WireGuard. In a group room, each member-to-host control and text link is encrypted, but the trusted host orders, relays, and can read group text; this is not host-blind group end-to-end encryption. Group files and voice notes bypass the host browser and travel over encrypted Tailcat links directly to the recipients selected by the sender.</p>
+        <p>Text, voice notes, control and relayed files use Tailcat WireGuard. When native files are enabled and supported by both peers, file bodies preferentially use reliable WebRTC DataChannels encrypted with DTLS, bypassing the Go network stack. Failed direct setup uses Tailcat/DERP. Incremental hashing still copies bounded chunks into WASM; this is not zero-copy. The trusted group host can read and relay group text, but does not relay file bodies.</p>
+        <p>Direct files can expose public IP addresses to the peer without requesting camera or microphone access. Interrupted files first query the save result and may restart from zero over the relay once, not resume. Unconfirmed results do not create an automatic duplicate. Partial OPFS files are removed before creating a new random path; picker retries reset the uncommitted transaction. Verified committed files survive lost receipts. Completion receipts exist only in room memory for up to 30 minutes and 256 items, and are cleared when the room ends.</p>
         <p>A group host can see nicknames, random member codes, membership, group text, file sizes, and selected recipients, but the coordination protocol does not give the host peer-to-peer file names, voice content, or file content. Any actual recipient can still keep, copy, or forward content received.</p>
         <p>Browser connections currently use public Tailcat DERP relays. A relay cannot read the encrypted content it carries, but it processes or observes endpoint IP addresses, connection time, DERP region, transfer volume, and traffic patterns. Public DERP is rate-limited, best-effort beta infrastructure with no uptime or throughput SLA. Relay operators may retain operational and abuse-prevention logs under their own policies. Link encryption does not make this an anonymity service.</p>
 

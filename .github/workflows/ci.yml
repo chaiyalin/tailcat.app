@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/mobile-support, feature/group-rooms-v2]
+    branches: [main, feature/mobile-support, feature/group-rooms-v2, feature/native-webrtc-files]
   pull_request:
   workflow_dispatch:
 
@@ -19,6 +19,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 24
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -107,8 +111,22 @@ jobs:
       - name: Install test dependencies
         run: npm ci
 
+      - name: Test native file transport primitives
+        run: npm run test:unit
+
       - name: Install supported browser channels
         run: npx playwright install --with-deps chrome msedge webkit
 
       - name: Run desktop and mobile-browser end-to-end tests
         run: npm run test:e2e
+
+      - name: Archive reproducible build and browser evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-files-${{ github.sha }}
+          retention-days: 14
+          path: |
+            dist/
+            test-results/
+            playwright-report/

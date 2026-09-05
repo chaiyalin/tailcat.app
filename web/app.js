@@ -1,4 +1,7 @@
 import { APP_CONFIG, defaultRegionCode, regionByCode } from "./config.js";
+import { FileTransportManager, supportsNativeFiles } from "./file-transport-manager.js";
+import { FileCoordination, sendCoordinatedFile, receiveCoordinatedFile } from "./file-coordination.js";
+import { CompletedFileReceipts } from "./file-transfer-state.js";
 import {
   FILE_SINK_KIND,
   FILE_SINK_REASON,
@@ -6,6 +9,7 @@ import {
   getReceiveCapacity,
   initializeFileSinks,
   probeFileSinkSupport,
+  resetFileSink,
 } from "./file-sinks.js";
 import { createI18n } from "./i18n.js";
 import {
@@ -39,6 +43,220 @@ const TCH_MAGIC = new Uint8Array([0x54, 0x43, 0x48, 0x31]); // TCH1
 const TCF_MAGIC = new Uint8Array([0x54, 0x43, 0x46, 0x31]); // TCF1
 const TCV_MAGIC = new Uint8Array([0x54, 0x43, 0x56, 0x31]); // TCV1 group voice
 const FILE_FRAME = Object.freeze({ META: 1, DATA: 2, FINAL: 3, CANCEL: 4 });
+const nativeFilePeers = new Map();
+const nativeFileReceipts = new CompletedFileReceipts();
+
+function nativeFilesEnabled() {
+  return APP_CONFIG.nativeFileTransfer.enabled && typeof RTCPeerConnection === "function";
+}
+
+function forceDerpFiles() {
+  try { return localStorage.getItem("tailcat.forceDerp") === "1"; } catch (_) { return false; }
+}
+
+function nativeFileSupported(context, peerId) {
+  if (!nativeFilesEnabled()) return false;
+  if (context.mode !== "group") return supportsNativeFiles(peerCapabilities);
+  const snapshot = groupRoom?.snapshot();
+  return Boolean(snapshot && supportsNativeFiles(snapshot.members.find((member) => member.id === snapshot.ownerId)?.capabilities)
+    && supportsNativeFiles(snapshot.members.find((member) => member.id === peerId)?.capabilities));
+}
+
+function closeNativeFilePeers(groupOnly = false) {
+  for (const [key, peer] of nativeFilePeers) {
+    if (groupOnly && !peer.group) continue;
+    peer.manager.close();
+    peer.controlClient?.close();
+    for (const mux of peer.muxes) mux.close();
+    nativeFilePeers.delete(key);
+  }
+  nativeFileReceipts.clear();
+}
+
+function nativeFilePeer(context, incoming) {
+  const group = context.mode === "group";
+  const room = group ? context.roomId : context.session;
+  const localId = group ? groupRoom.memberId : listener?.addr;
+  const peerId = group ? (incoming ? context.senderId : context.recipientId) : activePeerAddress;
+  const key = JSON.stringify([room, peerId]);
+  let peer = nativeFilePeers.get(key);
+  if (peer) return peer;
+  const controller = groupRoom, epoch = controller?.lifecycleEpoch;
+  const authorized = () => group
+    ? groupRoom === controller && controller.active && controller.lifecycleEpoch === epoch && controller.roomId === room
+      && !controller.snapshot().roomPaused && controller.snapshot().members.some((member) => member.id === peerId && member.status === "online")
+    : activeSession === room && activePeerAddress === peerId && listener?.addr === localId;
+  peer = { group, room, peerId, authorized, muxes: new Set(), manager: null, controlClient: null, controlStarting: null };
+  peer.manager = new FileTransportManager({ room, localId, peerId, isAuthorized: authorized,
+    sendSignal: (signal) => {
+      if (!group) return sendNativeFileSignal(peer, signal);
+      const mux = [...peer.muxes].find((item) => !item.closed);
+      if (!mux) throw new Error("native file coordinator closed");
+      return mux.notify("SIGNAL", signal);
+    },
+  });
+  nativeFilePeers.set(key, peer);
+  return peer;
+}
+
+async function nativeFileControlClient(peer) {
+  if (!peer.authorized()) throw new Error("AUTHORIZATION_EXPIRED");
+  // A cold Tailcat Client per ICE candidate spends the direct-setup deadline
+  // repeatedly establishing relay identity. Reuse a room-bound Client for
+  // native signaling, while preserving the authenticated port-100 envelope.
+  if (!peer.controlStarting) {
+    peer.controlStarting = tailcatConnect({ addr: peer.peerId, derpMapURL: APP_CONFIG.derpMapURL }).then((client) => {
+      if (!peer.authorized()) { client.close(); throw new Error("AUTHORIZATION_EXPIRED"); }
+      peer.controlClient = client; return client;
+    });
+    peer.controlStarting.catch(() => { peer.controlStarting = null; });
+  }
+  return peer.controlStarting;
+}
+
+function attachNativeSignalPipe(peer, connection) {
+  if (peer.signalPipes?.size >= 2) throw new Error("native signal pipe limit");
+  peer.signalPipes ||= new Set();
+  const mux = new FileCoordination(connection, { authorized: peer.authorized,
+    signal: (signal) => peer.manager.handleSignal(signal) });
+  mux.handlers.set("READY", () => true);
+  peer.signalPipes.add(mux);
+  peer.muxes.add(mux);
+  if (!peer.signalPipe || peer.signalPipe.closed) peer.signalPipe = mux;
+  void mux.ended.promise.then(() => {
+    peer.signalPipes.delete(mux); peer.muxes.delete(mux);
+    if (peer.signalPipe === mux) peer.signalPipe = null;
+  });
+  return mux;
+}
+
+async function nativeFileSignalPipe(peer) {
+  if (peer.signalPipe && !peer.signalPipe.closed) return peer.signalPipe;
+  if (!peer.signalOpening) {
+    peer.signalOpening = (async () => {
+      const client = await nativeFileControlClient(peer);
+      if (peer.signalPipe && !peer.signalPipe.closed) return peer.signalPipe;
+      const connection = await client.dial({ port: APP_CONFIG.ports.control });
+      let mux;
+      try {
+        if (!peer.authorized()) throw new Error("AUTHORIZATION_EXPIRED");
+        await writeChunked(connection, packChatEnvelope({ v: APP_CONFIG.protocolVersion,
+          session: peer.room, type: "NATIVE_FILE_SIGNAL_PIPE" }, new Uint8Array()));
+        mux = attachNativeSignalPipe(peer, connection);
+        await mux.rpc("READY", null);
+        return mux;
+      } catch (error) { mux?.close(); connection.close(); throw error; }
+    })().finally(() => { peer.signalOpening = null; });
+  }
+  return peer.signalOpening;
+}
+
+async function sendNativeFileSignal(peer, signal) {
+  const mux = await nativeFileSignalPipe(peer);
+  return mux.notify("SIGNAL", signal);
+}
+
+function nativeFilePath(ui, path, recipientId = "") {
+  const item = recipientId ? ui.statuses.get(recipientId)?.item : ui.item;
+  if (!item) return;
+  item.classList.add("native-file-transfer");
+  item.dataset.transport = path;
+  if (path === "webrtc" || path === "derp") item.dataset.route = path;
+  if (path === "retrying") item.dataset.route = "derp";
+  let label = item.querySelector(".native-file-path");
+  if (!label) { label = document.createElement("span"); label.className = "native-file-path"; item.append(label); }
+  label.dataset.i18n = `file_path_${path}`;
+  label.textContent = t(`file_path_${path}`);
+  if (recipientId) {
+    let progress = item.querySelector("progress");
+    if (!progress) {
+      progress = document.createElement("progress"); progress.max = 1; progress.value = 0;
+      progress.setAttribute("aria-label", t("transfer_progress")); item.append(progress);
+    }
+    if (path === "retrying") progress.value = 0;
+    if (path === "verified") progress.value = 1;
+  } else if (path === "retrying") ui.progress.value = 0;
+}
+
+function makeFileCoordination(connection, peer, authorized, readInitial) {
+  const mux = new FileCoordination(connection, { authorized,
+    signal: (value) => peer.manager.handleSignal(value), readInitial });
+  peer.muxes.add(mux);
+  void mux.ended.promise.then(() => peer.muxes.delete(mux));
+  return mux;
+}
+
+async function sendNativeFileBody(entry, connection, context, onDigest) {
+  const reader = new ConnectionReader(connection);
+  const hasher = tailcatNewSHA256();
+  let sent = 0;
+  try {
+    while (sent < entry.file.size) {
+      if (entry.cancelled) throw new Error("CANCELLED");
+      const end = Math.min(sent + APP_CONFIG.limits.fileChunkBytes, entry.file.size);
+      const chunk = new Uint8Array(await entry.file.slice(sent, end).arrayBuffer());
+      if (chunk.length !== end - sent) throw new Error("FILE_CHANGED");
+      await hasher.update(chunk);
+      await connection.write(packFileFrame(FILE_FRAME.DATA, chunk));
+      sent = end;
+      if (context.mode !== "group") {
+        tcTest.sentBytes = sent;
+        entry.ui.progress.value = entry.file.size ? sent / entry.file.size : 1;
+        entry.ui.detail.textContent = format("file_sending", { name: entry.name, sent: humanSize(sent), total: humanSize(entry.file.size) });
+      } else {
+        const progress = entry.ui.statuses.get(context.recipientId)?.item.querySelector("progress");
+        if (progress) progress.value = entry.file.size ? sent / entry.file.size : 1;
+      }
+      noteFileTraffic(context);
+    }
+    const digest = await hasher.digestHex(); onDigest(digest);
+    await connection.write(packFileJSON(FILE_FRAME.FINAL, fileWireMeta(context, "FINAL", { size: sent, sha256: digest })));
+    const done = decodeFileJSON(await readFileFrame(reader), [FILE_FRAME.FINAL, FILE_FRAME.CANCEL]);
+    if (!fileWireMatches(done, context) || done.type !== "DONE" || done.size !== sent || done.sha256 !== digest) {
+      throw new Error("RECEIVER_VERIFICATION_FAILED");
+    }
+    connection.acknowledgeRead();
+    return { state: "committed", size: sent, sha256: digest };
+  } finally { hasher.close(); }
+}
+
+async function sendNativeAcceptedFile(entry, connection, context, incomingResponse, grant = null) {
+  const peer = nativeFilePeer(context, false);
+  const current = () => peer.authorized() && !entry.cancelled
+    && (!grant || !entry.invalidRecipients.has(grant.recipientId));
+  const mux = makeFileCoordination(connection, peer, current);
+  let digest = "";
+  let result;
+  try { result = await sendCoordinatedFile({ mux, manager: peer.manager, attemptId: context.transferId,
+    forceDerp: forceDerpFiles() || incomingResponse.forceDerp === true,
+    authorized: current, expectedDigest: () => digest,
+    onPath: (path) => nativeFilePath(entry.ui, path, grant?.recipientId),
+    sendBody: (stream, attemptId) => {
+      digest = "";
+      return sendNativeFileBody(entry, stream, { ...context, transferId: attemptId }, (value) => { digest = value; });
+    },
+    retryGrant: async (attemptId) => {
+      if (!grant) return null;
+      const response = await groupRoom.requestTransferTickets({ kind: "file",
+        items: [{ transferId: attemptId, size: entry.file.size }], recipientIds: [grant.recipientId],
+        targetTransferId: attemptId, targetRecipientId: grant.recipientId });
+      const next = response.grants[0];
+      if (!next) throw new Error("RETRY_TICKET_REJECTED");
+      return next;
+    },
+  }); } catch (error) {
+    nativeFilePath(entry.ui, error.code === "RESULT_UNCONFIRMED" ? "unconfirmed" : (entry.cancelled ? "cancelled" : "failed"), grant?.recipientId);
+    throw error;
+  }
+  if (result.size !== entry.file.size || result.sha256 !== digest) throw new Error("RECEIVER_VERIFICATION_FAILED");
+  nativeFilePath(entry.ui, "verified", grant?.recipientId);
+  if (!grant) {
+    tcTest.sendDone = true; tcTest.sentSha256 = digest; tcTest.sentBytes = entry.file.size;
+    entry.ui.progress.value = 1; entry.ui.detail.textContent = t("file_sent");
+    addMessage({ type: "file", mine: true, name: entry.name, size: entry.file.size, status: t("file_sent") });
+    setStatus(t("file_sent"), "connected");
+  }
+}
 const DB_NAME = "tailcat-app";
 const DB_STORE = "private-settings";
 const DB_KEY = "remembered-listener";
@@ -1004,6 +1222,7 @@ function localCapabilities() {
     text: { maxBytes: APP_CONFIG.limits.textBytes },
     file: {
       protocol: "TCF1",
+      transports: nativeFilesEnabled() ? ["tailcat", "webrtc-dc-v1"] : ["tailcat"],
       maxBytes: fileSinkSupport.maxBytes,
       chunkBytes: APP_CONFIG.limits.fileChunkBytes,
       receive: Boolean(fileSinkSupport.preferredKind && fileSinkSupport.maxBytes >= 0),
@@ -1228,6 +1447,11 @@ function updateGroupTestState(snapshot) {
 }
 
 function renderGroupState(snapshot) {
+  for (const [key, peer] of nativeFilePeers) {
+    if (peer.group && !peer.authorized()) {
+      peer.manager.close(); for (const mux of peer.muxes) mux.close(); nativeFilePeers.delete(key);
+    }
+  }
   if (previousGroupMode === "none" && snapshot.mode !== "none") groupTextEventCount = 0;
   previousGroupMode = snapshot.mode;
   updateGroupTestState(snapshot);
@@ -1399,11 +1623,11 @@ function cancelGroupTransferConnections(memberId = "") {
     entry.cancelDecision?.();
     safeConnectionClose(entry.connection);
   }
-  if (activeFileTransfer?.group
-    && (!memberId || activeFileTransfer.senderId === memberId || activeFileTransfer.recipientId === memberId)) {
-    activeFileTransfer.cancelled = true;
-    activeFileTransfer.cancelDecision?.();
-    safeConnectionClose(activeFileTransfer.connection);
+  if (incomingFileTransfer?.group
+    && (!memberId || incomingFileTransfer.senderId === memberId || incomingFileTransfer.recipientId === memberId)) {
+    incomingFileTransfer.cancelled = true;
+    incomingFileTransfer.cancelDecision?.();
+    safeConnectionClose(incomingFileTransfer.connection);
   }
 }
 
@@ -1412,6 +1636,7 @@ function safeConnectionClose(connection) {
 }
 
 function handleGroupClosed(reason, { roomId = "" } = {}) {
+  closeNativeFilePeers(true);
   clearTimeout(groupBackgroundCloseTimer);
   groupBackgroundCloseTimer = null;
   groupBackgroundedAt = 0;
@@ -1523,7 +1748,7 @@ async function runPeerHeartbeat(generation) {
     }
   } catch (_) {
     if (generation === heartbeatGeneration && session === activeSession && address === activePeerAddress) {
-      const activeFileRecentlyMoved = Boolean(activeFileTransfer)
+      const activeFileRecentlyMoved = Boolean(activeFileTransfer || incomingFileTransfer)
         && Date.now() - lastAuthenticatedPeerTrafficAt < HEARTBEAT_INTERVAL_MS + HEARTBEAT_RESPONSE_TIMEOUT_MS;
       const liveCallStillConnected = peerConnection?.connectionState === "connected";
       if (activeFileRecentlyMoved || liveCallStillConnected) {
@@ -1602,7 +1827,7 @@ function notePageBackgrounded() {
     }
     $("background-risk").classList.remove("hidden");
   }
-  if (support.mobile && (activeSession || activeFileTransfer || recorder || peerConnection || handshakeWaiter)) {
+  if (support.mobile && (activeSession || activeFileTransfer || incomingFileTransfer || recorder || peerConnection || handshakeWaiter)) {
     $("background-risk").classList.remove("hidden");
   }
 }
@@ -1629,6 +1854,7 @@ function resumeForegroundSession() {
 }
 
 function clearPeer() {
+  closeNativeFilePeers();
   cancelActiveVoiceRecording();
   stopPeerHeartbeat();
   lastAuthenticatedPeerTrafficAt = 0;
@@ -2180,8 +2406,24 @@ async function receiveGroupConnection(connection) {
 
 async function receiveControl(connection) {
   try {
-    const bytes = await readAllBounded(connection, APP_CONFIG.limits.controlBytes + 8);
-    const { meta, payload } = unpackChatEnvelope(bytes);
+    // Parse the bounded TCH1 header before EOF so the optional authenticated
+    // native-file signaling stream can remain open across SDP and ICE frames.
+    const reader = new ConnectionReader(connection);
+    const deadlineAt = Date.now() + STREAM_READ_TIMEOUT_MS;
+    const header = await withConnectionUntil(connection, reader.readExact(8), deadlineAt, "control header deadline exceeded");
+    const length = new DataView(header.buffer).getUint32(4);
+    if (new TextDecoder().decode(header.subarray(0, 4)) !== "TCH1"
+      || length > APP_CONFIG.limits.controlBytes) throw new Error("invalid control header");
+    const json = await withConnectionUntil(connection, reader.readExact(length), deadlineAt, "control metadata deadline exceeded");
+    const meta = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(json));
+    if (meta.type === "NATIVE_FILE_SIGNAL_PIPE") {
+      if (!hasSession(meta) || !nativeFileSupported({ mode: "private" })) throw new Error("native signal session rejected");
+      const peer = nativeFilePeer({ mode: "private", session: activeSession }, true);
+      const mux = attachNativeSignalPipe(peer, connection);
+      await mux.ended.promise;
+      return;
+    }
+    const payload = await withConnectionUntil(connection, readAllBounded(connection, 1), deadlineAt, "control message deadline exceeded");
     if (payload.length) throw new Error("control message cannot have a payload");
     if (meta.type === "HELLO") {
       await wakeLocks.acquire("handshake");
@@ -2209,6 +2451,15 @@ async function receiveControl(connection) {
       return;
     }
     if (!hasSession(meta)) throw new Error("control session rejected");
+    if (meta.type === "NATIVE_FILE_SIGNAL") {
+      const peer = nativeFilePeers.get(JSON.stringify([activeSession, activePeerAddress]));
+      if (!peer) throw new Error("native file signal has no authorized transfer");
+      // A control stream acknowledges delivery, not completion of a whole
+      // offer/answer exchange. Waiting here would make REQUEST → OFFER →
+      // ANSWER recursively wait on the offerer's serialized signal handler.
+      void peer.manager.handleSignal(meta.signal).catch((error) => recordError(error));
+      return;
+    }
     if (meta.type === "SESSION_PING") {
       if (typeof meta.pingId !== "string" || meta.pingId.length !== 32) throw new Error("invalid heartbeat");
       await connection.write(packChatEnvelope(sessionMeta("SESSION_PONG", { pingId: meta.pingId })));
@@ -2855,6 +3106,7 @@ function noteFileTraffic(context) {
 }
 
 let activeFileTransfer = null;
+let incomingFileTransfer = null;
 const outgoingFileQueue = [];
 const finishedTransferItems = [];
 let processingFileQueue = false;
@@ -2957,6 +3209,7 @@ function createOutgoingTransferItem(file) {
   const name = document.createElement("strong");
   name.textContent = sanitizeFileName(file.name);
   const detail = document.createElement("span");
+  detail.className = "transfer-detail";
   detail.textContent = format("file_queued", { name: sanitizeFileName(file.name) });
   const progress = document.createElement("progress");
   progress.max = 1;
@@ -3326,6 +3579,8 @@ async function sendGroupFileTransfer(entry, grant) {
     hasher = tailcatNewSHA256();
     const offer = fileWireMeta(context, "OFFER", {
       ticket: grant.ticket,
+      nativeFile: nativeFileSupported(context, grant.recipientId)
+        ? { v: 1, logicalId: entry.nativeLogicalId ||= randomID() } : undefined,
       name: entry.name,
       size: entry.file.size,
       mime: safeMime(entry.file.type),
@@ -3349,6 +3604,10 @@ async function sendGroupFileTransfer(entry, grant) {
       throw error;
     }
     setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_accepted", "accepted");
+    if (offer.nativeFile && response.nativeFile === 1) {
+      await sendNativeAcceptedFile(entry, connection, context, response, grant);
+      return;
+    }
     setGroupTransferRecipientStatus(entry, grant.recipientId, "group_transfer_sending", "transferring");
     const dataDeadlineAt = Date.now() + fileDataDeadlineMs(entry.file.size);
     while (sent < entry.file.size) {
@@ -3451,7 +3710,7 @@ function enqueueFiles(files) {
 }
 
 async function processFileQueue() {
-  if (processingFileQueue || activeFileTransfer?.direction === "incoming") return;
+  if (processingFileQueue || (incomingFileTransfer && !nativeFilesEnabled())) return;
   processingFileQueue = true;
   try {
     while (outgoingFileQueue.length) {
@@ -3504,7 +3763,13 @@ async function sendFileTransfer(entry) {
   tcTest.sentSha256 = null;
   await wakeLocks.acquire("file-transfer");
   try {
-    connection = await tailcatDial({
+    if (nativeFileSupported({ mode: "private" })) {
+      const peer = nativeFilePeer({ mode: "private", session }, false);
+      const client = await nativeFileControlClient(peer);
+      try { await nativeFileSignalPipe(peer); }
+      catch (_) { peer.manager.fail(); }
+      connection = await client.dial({ port: APP_CONFIG.ports.file });
+    } else connection = await tailcatDial({
       addr: address,
       derpMapURL: APP_CONFIG.derpMapURL,
       port: APP_CONFIG.ports.file,
@@ -3518,6 +3783,8 @@ async function sendFileTransfer(entry) {
       v: APP_CONFIG.protocolVersion,
       session,
       transferId,
+      nativeFile: nativeFileSupported({ mode: "private" })
+        ? { v: 1, logicalId: entry.nativeLogicalId ||= randomID() } : undefined,
       name: entry.name,
       size: entry.file.size,
       mime: safeMime(entry.file.type),
@@ -3552,6 +3819,10 @@ async function sendFileTransfer(entry) {
     // File bytes are read only after ACCEPT. slice().arrayBuffer() bounds each
     // allocation to 64 KiB; file.arrayBuffer() and whole-file buffering are
     // intentionally never used.
+    if (offer.nativeFile && response.nativeFile === 1) {
+      await sendNativeAcceptedFile(entry, connection, { mode: "private", session, transferId }, response);
+      return;
+    }
     while (sent < entry.file.size) {
       if (entry.cancelled) {
         await connection.write(packFileJSON(FILE_FRAME.CANCEL, {
@@ -3681,7 +3952,7 @@ async function receiveFile(connection) {
     offer.mime = safeMime(offer.mime);
     noteFileTraffic(context);
 
-    if (activeFileTransfer) {
+    if (incomingFileTransfer || (activeFileTransfer && !nativeFilesEnabled())) {
       await withConnectionDeadline(
         connection,
         connection.write(packFileJSON(FILE_FRAME.META, fileWireMeta(context, "REJECT", { reason: "BUSY" }))),
@@ -3702,7 +3973,7 @@ async function receiveFile(connection) {
       roomId: context.roomId || "",
       generation: groupGeneration,
     };
-    activeFileTransfer = transferState;
+    incomingFileTransfer = transferState;
     let automaticReceive = false;
     const capacity = await withConnectionDeadline(connection, (async () => {
       await refreshFileSinkSupport();
@@ -3718,7 +3989,7 @@ async function receiveFile(connection) {
         hardMaxBytes: APP_CONFIG.limits.fileBytes,
       });
     })(), STREAM_READ_TIMEOUT_MS, "file capacity check timed out");
-    if (activeFileTransfer !== transferState
+    if (incomingFileTransfer !== transferState
       || transferState.cancelled
       || (context.mode === "private" && activeSession !== context.session)
       || (context.mode === "group"
@@ -3735,7 +4006,7 @@ async function receiveFile(connection) {
         fileWireMeta(context, "REJECT", { reason: capacity.reason || FILE_SINK_REASON.NO_SINK }),
       )), STREAM_READ_TIMEOUT_MS, "file capacity response timed out");
       if (context.mode === "group"
-        && (activeFileTransfer !== transferState
+        && (incomingFileTransfer !== transferState
           || transferState.cancelled
           || !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
         return;
@@ -3766,32 +4037,31 @@ async function receiveFile(connection) {
     if (decision.error) throw decision.error;
     if (!decision.accepted) return;
     sink = decision.sink;
-    activeFileTransfer.sink = sink;
+    incomingFileTransfer.sink = sink;
     accepted = true;
     hasher = tailcatNewSHA256();
     tcTest.state.file = "receiving";
     tcTest.recvDone = false;
     tcTest.recvBytes = 0;
     tcTest.recvSha256 = null;
-    if (activeFileTransfer !== transferState
+    if (incomingFileTransfer !== transferState
       || transferState.cancelled
       || (context.mode === "private" && activeSession !== context.session)
       || (context.mode === "group"
         && !groupInboundTransferIsCurrent(groupController, groupEpoch, context, groupGeneration))) {
       throw new Error("file offer session changed before acceptance");
     }
-    await withConnectionDeadline(
-      connection,
-      connection.write(packFileJSON(FILE_FRAME.META, fileWireMeta(context, "ACCEPT"))),
-      STREAM_READ_TIMEOUT_MS,
-      "file acceptance write timed out",
-    );
     ui.save.classList.add("hidden");
     ui.reject.classList.add("hidden");
     ui.cancel.classList.remove("hidden");
 
+    const receiveBody = async (connection, attemptId, native = false) => {
+    context.transferId = attemptId;
+    const reader = new ConnectionReader(connection);
+    hasher?.close();
+    hasher = tailcatNewSHA256();
     let received = 0;
-    let prefetchedHeader = decision.prefetchedHeader;
+    let prefetchedHeader = native ? null : decision.prefetchedHeader;
     // Group transfers have a whole-body deadline so a selected recipient
     // cannot hold a group transfer slot forever. Private TCF1 retains its v1
     // per-read stall semantics and therefore has no aggregate throughput floor.
@@ -3828,9 +4098,10 @@ async function receiveFile(connection) {
         if (remaining <= 0 || frame.payload.length !== expected) {
           throw new Error("file chunk length violates TCF1");
         }
-        if (activeFileTransfer?.cancelled) throw new Error(t("file_cancelled"));
+        if (incomingFileTransfer?.cancelled) throw new Error(t("file_cancelled"));
         await sink.write(frame.payload);
         await hasher.update(frame.payload);
+        connection.acknowledgeRead?.();
         received += frame.payload.length;
         tcTest.recvBytes = received;
         ui.progress.value = offer.size ? received / offer.size : 1;
@@ -3856,6 +4127,11 @@ async function receiveFile(connection) {
       let stagedExport = null;
       if (sink.kind === FILE_SINK_KIND.OPFS_EXPORT) stagedExport = await sink.prepareExport();
       localArtifactReady = true;
+      if (native) {
+        nativeFileReceipts.commit({ room: context.roomId || context.session,
+          peer: context.senderId || activePeerAddress,
+          logicalTransferId: offer.nativeFile.logicalId, size: received }, digest);
+      }
       const doneFrame = packFileJSON(FILE_FRAME.FINAL, fileWireMeta(context, "DONE", {
         size: received,
         sha256: digest,
@@ -3878,7 +4154,7 @@ async function receiveFile(connection) {
         if (context.mode === "group") recordGroupError(error);
         else recordError(error);
       }
-      if (completed) {
+      if (completed && !native) {
         // The sender treats the DONE frame itself as terminal and does not wait
         // for EOF, so a half-close failure must never roll back a saved file.
         try {
@@ -3925,8 +4201,56 @@ async function receiveFile(connection) {
         });
         setStatus(status, confirmationError ? "error" : "connected");
       }
-      break;
+      return { state: "committed", size: received, sha256: digest };
     }
+    };
+
+    const native = offer.nativeFile?.v === 1 && /^[0-9a-f]{32}$/u.test(offer.nativeFile.logicalId)
+      && nativeFileSupported(context, context.senderId);
+    let reception = null;
+    if (native) {
+      const peer = nativeFilePeer(context, true);
+      // Prepare the return Tailcat signaling path before ACCEPT starts the
+      // sender's 10-second WebRTC clock. ICE itself is never given extra time.
+      if (context.mode === "private") {
+        try { await nativeFileSignalPipe(peer); }
+        catch (_) { peer.manager.fail(); }
+      }
+      const current = () => peer.authorized() && incomingFileTransfer === transferState && !transferState.cancelled;
+      const mux = makeFileCoordination(connection, peer, current, async () => {
+        const frame = await readFileFramePayload(reader, await decision.prefetchedHeader);
+        if (frame.kind !== FILE_FRAME.META) throw new Error("COORDINATION_FRAME");
+        return frame.payload;
+      });
+      reception = receiveCoordinatedFile({ mux, manager: peer.manager, attemptId: context.transferId,
+        authorized: current,
+        receiveBody: (stream, attemptId) => receiveBody(stream, attemptId, true),
+        queryReceipt: () => nativeFileReceipts.query({ room: context.roomId || context.session,
+          peer: context.senderId || activePeerAddress, logicalTransferId: offer.nativeFile.logicalId, size: offer.size }),
+        onPath: (path) => nativeFilePath(ui, path),
+        reset: async (attemptId, grant) => {
+          if (localArtifactReady || !current()) throw new Error("RESTART_REJECTED");
+          if (context.mode === "group") {
+            if (grant?.transferId !== attemptId || grant.roomId !== context.roomId
+              || grant.senderId !== context.senderId || grant.recipientId !== context.recipientId
+              || grant.size !== offer.size) throw new Error("RETRY_TICKET_REJECTED");
+            await groupController.consumeTransferTicket(grant, "file", offer.size);
+          }
+          if (!current()) throw new Error("RESTART_REJECTED");
+          sink = await resetFileSink(sink, attemptId);
+          transferState.sink = sink;
+          ui.progress.value = 0;
+          tcTest.recvBytes = 0;
+        },
+      });
+      // Observe early setup/cancellation failures while ACCEPT is still writing.
+      reception.catch(() => {});
+    }
+    await withConnectionDeadline(connection, connection.write(packFileJSON(FILE_FRAME.META,
+      fileWireMeta(context, "ACCEPT", native ? { nativeFile: 1, forceDerp: forceDerpFiles() } : {}))),
+    STREAM_READ_TIMEOUT_MS, "file acceptance write timed out");
+    if (reception) { await reception; nativeFilePath(ui, "verified"); }
+    else await receiveBody(connection, context.transferId);
   } catch (error) {
     const preserveVerifiedSink = localArtifactReady && terminalWriteStarted;
     if (sink && !completed && !preserveVerifiedSink) {
@@ -3945,6 +4269,7 @@ async function receiveFile(connection) {
       } catch (_) {}
     }
     if (ui) {
+      if (ui.item.classList.contains("native-file-transfer") && !preserveVerifiedSink) nativeFilePath(ui, "failed");
       ui.detail.textContent = error.message === t("file_hash_failed") ? t("file_hash_failed") : format("file_failed", { message: redact(error.message) });
       ui.cancel.classList.add("hidden");
     }
@@ -3962,7 +4287,7 @@ async function receiveFile(connection) {
     }
     hasher?.close();
     connection.close();
-    if (activeFileTransfer?.connection === connection) activeFileTransfer = null;
+    if (incomingFileTransfer?.connection === connection) incomingFileTransfer = null;
     finishTransferItem(ui);
     tcTest.state.file = "idle";
     await wakeLocks.release("file-transfer");
@@ -4030,7 +4355,7 @@ function waitForIncomingFileDecision(
     let timeout = null;
     const releaseDecision = () => {
       clearTimeout(timeout);
-      if (activeFileTransfer?.connection === connection) activeFileTransfer.cancelDecision = null;
+      if (incomingFileTransfer?.connection === connection) incomingFileTransfer.cancelDecision = null;
     };
     const claim = () => {
       if (claimed) return false;
@@ -4108,8 +4433,8 @@ function waitForIncomingFileDecision(
       finish(remoteClosed ? { accepted: false } : { accepted: false, error });
     });
     timeout = setTimeout(() => { void rejectOffer("OFFER_TIMEOUT", t("file_cancelled")); }, FILE_DECISION_TIMEOUT_MS);
-    if (activeFileTransfer?.connection === connection) {
-      activeFileTransfer.cancelDecision = () => rejectOffer("ROOM_CLOSED", t("file_cancelled"));
+    if (incomingFileTransfer?.connection === connection) {
+      incomingFileTransfer.cancelDecision = () => rejectOffer("ROOM_CLOSED", t("file_cancelled"));
     }
     ui.save.onclick = async () => {
       if (claimed) return;
@@ -4130,8 +4455,8 @@ function waitForIncomingFileDecision(
     };
     ui.reject.onclick = () => rejectOffer("USER_REJECTED");
     ui.cancel.onclick = () => {
-      if (activeFileTransfer?.connection === connection) {
-        activeFileTransfer.cancelled = true;
+      if (incomingFileTransfer?.connection === connection) {
+        incomingFileTransfer.cancelled = true;
         connection.close();
       }
     };
@@ -4289,6 +4614,11 @@ function configureStagedFileUI(ui, sink, prepared, { group = false } = {}) {
 }
 
 function cancelAllTransfers() {
+  if (incomingFileTransfer) {
+    incomingFileTransfer.cancelled = true;
+    incomingFileTransfer.cancelDecision?.();
+    incomingFileTransfer.connection.close();
+  }
   cancelGroupTransferConnections();
   for (const entry of outgoingFileQueue) {
     entry.cancelled = true;
@@ -5668,6 +5998,13 @@ $("group-recipient-all")?.addEventListener("change", (event) => {
 $("persist-key").addEventListener("change", () => {
   $("persist-risk").classList.toggle("hidden", !$("persist-key").checked);
 });
+
+$("native-file-note")?.classList.toggle("hidden", !nativeFilesEnabled());
+$("force-derp-label")?.classList.toggle("hidden", !nativeFilesEnabled());
+if ($("force-derp")) $("force-derp").checked = forceDerpFiles();
+$("force-derp")?.addEventListener("change", (event) => {
+  try { localStorage.setItem("tailcat.forceDerp", event.target.checked ? "1" : "0"); } catch (_) {}
+});
 $("forget-key").addEventListener("click", async () => {
   try {
     await dbDelete();
@@ -5778,6 +6115,7 @@ $("media-expand").addEventListener("click", () => {
 window.addEventListener("beforeunload", () => {
   if (groupRoom?.active) void groupRoom.close(groupRoom.mode === "owner" ? "HOST_CLOSED" : "LEFT", { notify: true });
   listener?.close();
+  incomingFileTransfer?.connection?.close();
   activeFileTransfer?.connection?.close();
   activeFileTransfer?.entry?.connection?.close();
   void wakeLocks.cleanup();
@@ -5794,6 +6132,7 @@ subscribePageLifecycle({
     if (!persisted) {
       if (groupRoom?.active) void groupRoom.close(groupRoom.mode === "owner" ? "HOST_CLOSED" : "LEFT", { notify: true });
       listener?.close();
+      incomingFileTransfer?.connection?.close();
       activeFileTransfer?.connection?.close();
       activeFileTransfer?.entry?.connection?.close();
     }

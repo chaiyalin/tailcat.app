@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   timeout: 120_000,
   expect: { timeout: 15_000 },
-  reporter: process.env.CI ? "github" : "list",
+  reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: "http://127.0.0.1:4173",
     viewport: { width: 1440, height: 1000 },
@@ -26,7 +26,7 @@ export default defineConfig({
     { name: "edge", testIgnore: /mobile\.spec\.js/u, use: { channel: "msedge" } },
     {
       name: "android-chrome",
-      testMatch: /mobile\.spec\.js/u,
+      testMatch: /(?:mobile|native-file-stream)\.spec\.js/u,
       use: {
         channel: "chrome",
         userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
@@ -38,7 +38,7 @@ export default defineConfig({
     },
     {
       name: "ios-safari",
-      testMatch: /mobile\.spec\.js/u,
+      testMatch: /(?:mobile|native-file-stream)\.spec\.js/u,
       use: {
         // Safari upgrades loopback subresources under the production CSP. Use
         // one synthetic HTTPS origin from the first navigation so classic

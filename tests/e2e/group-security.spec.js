@@ -1376,7 +1376,7 @@ test("member capabilities use a fixed schema and keep a ten-person roster frame 
   expect(result).toEqual({
     rosterSize: 10,
     topLevelKeys: ["file", "voice"],
-    fileKeys: ["protocol", "receive", "maxBytes"],
+    fileKeys: ["protocol", "receive", "maxBytes", "transports"],
     voiceKeys: ["enabled", "maxBytes", "playTypes"],
     playTypes: ["audio/webm;codecs=opus", "audio/ogg", "video/webm"],
     oversizedMimeDropped: true,

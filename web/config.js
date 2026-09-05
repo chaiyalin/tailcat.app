@@ -7,8 +7,10 @@ const MOBILE_GROUP_HOSTING_ENABLED = globalThis.__TAILCAT_MOBILE_GROUP_HOSTING__
 const PREVIEW_INVITES_ENABLED = globalThis.__TAILCAT_PREVIEW_INVITES__ === true;
 
 export const APP_CONFIG = Object.freeze({
-  version: "0.3.0-beta.1",
+  version: "0.4.0-beta.1",
+  sourceSHA: globalThis.__TAILCAT_SOURCE_SHA__ || "development",
   protocolVersion: 1,
+  nativeFileTransfer: Object.freeze({ enabled: globalThis.__TAILCAT_NATIVE_FILES__ === true }),
   // Emergency beta kill switch. Set false and redeploy this static file to
   // leave the explanatory site online while preventing new rooms.
   roomsEnabled: true,
