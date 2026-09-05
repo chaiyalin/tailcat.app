@@ -492,6 +492,9 @@ export async function installMockTailcat(page, namespace) {
         }
       },
       snapshot() {
+        // Persistent signaling deliberately has no per-message closeWrite.
+        // Decode its bounded initial envelope without waiting for stream EOF.
+        records.forEach(parseEnvelope);
         return {
           endpoint,
           listenerAddress: listener?.addr || null,
