@@ -120,6 +120,7 @@ export class FileCoordination {
   }
   notify(notify, value) { return this.control({ notify, value }); }
   async rpc(method, value, ms = 15_000) {
+    if (this.closed) throw new NativeFileError("RESULT_UNCONFIRMED");
     if (this.pending.size >= 8) throw new Error("COORDINATION_BUSY");
     const id = newFileAttemptId(), outcome = deferred();
     this.pending.set(id, outcome);
@@ -128,6 +129,9 @@ export class FileCoordination {
         await this.control({ request: id, method, value });
         return outcome.promise;
       })(), ms);
+    } catch (error) {
+      if (this.closed && error.code !== "PEER_REJECTED") throw new NativeFileError("RESULT_UNCONFIRMED");
+      throw error;
     } finally { this.pending.delete(id); }
   }
   relay(id) {

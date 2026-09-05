@@ -52,4 +52,5 @@ test("closed coordination rejects outstanding result queries", async () => {
   await received;
   a.close(); b.close(); await pending;
   assert.equal(a.pending.size, 0);
+  await assert.rejects(a.rpc("QUERY"), /RESULT_UNCONFIRMED/u);
 });
