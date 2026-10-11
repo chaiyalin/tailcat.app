@@ -4,7 +4,7 @@ delete process.env.DEBUG;
 delete process.env.PWDEBUG;
 
 let stage = "configuration";
-const legacyURL = "https://6c2748cd.tailcat-app.pages.dev/";
+const legacyURL = process.env.TAILCAT_LEGACY_URL || "https://tailcat.app/";
 const bounded = (promise, milliseconds = 30_000) => {
   let timer;
   return Promise.race([promise, new Promise((_, reject) => {
@@ -18,6 +18,11 @@ async function main() {
     return;
   }
   const url = new URL(process.env.TAILCAT_CANDIDATE_URL);
+  const legacyOrigin = new URL(legacyURL);
+  assert.equal(legacyOrigin.protocol, "https:");
+  assert(legacyOrigin.hostname === "tailcat.app" || legacyOrigin.hostname.endsWith(".tailcat-app.pages.dev"));
+  assert(legacyOrigin.pathname === "/" && !legacyOrigin.search && !legacyOrigin.hash
+    && !legacyOrigin.username && !legacyOrigin.password);
   assert.equal(url.protocol, "https:");
   assert(!url.username && !url.password && !url.search && !url.hash);
   const { chromium, expect } = await import("@playwright/test");

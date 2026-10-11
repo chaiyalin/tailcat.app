@@ -53,7 +53,7 @@ This is small-file release smoke coverage. It does not replace real Android/iOS,
 cross-network interruption, 100 MiB/1 GiB, memory-pressure or endurance gates.
 
 `persistence-lifecycle.mjs` separately restores a disposable identity from the
-immutable legacy production deployment, checks unchanged address bytes, and
+current legacy production page, checks unchanged address bytes, and
 immediately closes five candidate listeners. It requires responsive browser
 timers, idempotent native close shims, and zero remaining official WebSockets:
 
@@ -63,3 +63,6 @@ LIVE_PERSISTENCE_LIFECYCLE=1 TAILCAT_CANDIDATE_URL=https://YOUR-CANDIDATE.pages.
 
 Only the disposable legacy context is destroyed; its known blocking startup
 close is not reused. All candidate lifecycle operations have explicit deadlines.
+Run before production is upgraded; later runs require `TAILCAT_LEGACY_URL`
+pointing to an operator-accessible old deployment. Protected archive URLs are
+not bypassed or made public by the script.
