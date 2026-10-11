@@ -662,7 +662,11 @@ test("closing rejects resume and removal while ROOM_CLOSED is still writing", as
 
 test("ticket control writes time out without leaking waiters or rejections", async ({ page }) => {
   await page.goto("/");
-  const result = await page.evaluate(async () => {
+  // WASM startup can block the page's event loop; it is unrelated to ticket deadlines.
+  await page.waitForFunction(() => window.tcTest?.ready);
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 60_000));
+  const resultPromise = page.evaluate(async () => {
     const controlBudgetMs = 25;
     const watchdogMs = 250;
     const config = {
@@ -805,6 +809,12 @@ test("ticket control writes time out without leaking waiters or rejections", asy
     window.removeEventListener("unhandledrejection", captureUnhandled);
     return { memberState, ownerState, unhandled };
   });
+
+  // Start the page operation before advancing both 25 ms deadlines and the
+  // rejection-observation interval. runFor preserves timer order and microtasks.
+  await page.evaluate(() => undefined);
+  await page.clock.runFor(1_000);
+  const result = await resultPromise;
 
   expect(result).toEqual({
     memberState: {

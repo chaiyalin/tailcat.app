@@ -14,10 +14,133 @@ import (
 	"syscall/js"
 	"testing"
 	"time"
+
+	"github.com/tailscale/tailcat"
 )
 
+// These disposable fixture keys and address were generated and serialized with
+// github.com/tailscale/tailcat v0.4.0. Keeping the literal old bytes means this
+// test catches a wire-format change rather than comparing v0.7 with itself.
+const v04ListenerKeyJSON = `{"Private":"privkey:088e75f612f5ce459a0a7af66830eedae601a59951ba5af0376d4367079b817e","Public":{"ServerPublic":"nodekey:d4432ec8ba9baa857e26790c68ad5da9b7b195b3bf6e34352d91d64e14915f79","ServerDiscoPublic":"discokey:93a09eea6a18b02094c7e0ba9ea3b648f35738bf4e3f24d10a7443a914635175","RegionID":304}}`
+const v04ListenerAddr = "tco2FwWCDUQy7IupuqhX4meQxorV2pt7GVs79uNDUtkdZOFJFfeWFrWCCToJ7qahiwIJTH4Lqeo7ZI81c4v04_JNEKdEOpFGNRdWFpGQEw"
+
+func TestBrowserListenerNewKeyRetainsNoPSKFormat(t *testing.T) {
+	pk, err := browserListenerKey("")
+	if err != nil {
+		t.Fatalf("new listener key: %v", err)
+	}
+	if !pk.Public.PresharedKey.IsZero() {
+		t.Fatal("new compatible browser listener includes a PSK")
+	}
+	if pk.Private.IsZero() || pk.Public.ServerPublic.NodePublic != pk.Private.Public() || pk.Public.ServerDiscoPublic.IsZero() {
+		t.Fatal("new listener lost its node or independent discovery identity")
+	}
+	if pk.Public.RegionID != -1 || len(pk.Public.Region) != 0 {
+		t.Fatal("new listener did not retain automatic region selection")
+	}
+	pk.Public.RegionID = 304
+	ci, err := tailcat.ParseAddr(pk.Public.Addr())
+	if err != nil || !ci.PresharedKey.IsZero() {
+		t.Fatalf("new address does not round-trip without a PSK: %v", err)
+	}
+	if !ci.ServerPublic.Equal(pk.Public.ServerPublic) || !ci.ServerDiscoPublic.Equal(pk.Public.ServerDiscoPublic) {
+		t.Fatal("new listener address changed node or discovery identity")
+	}
+}
+
+func TestBrowserListenerRestoresV04IdentityAndAddressBytes(t *testing.T) {
+	pk, err := browserListenerKey(v04ListenerKeyJSON)
+	if err != nil {
+		t.Fatalf("restore v0.4 key: %v", err)
+	}
+	if !pk.Public.PresharedKey.IsZero() {
+		t.Fatal("restoring a v0.4 key introduced a PSK")
+	}
+	if got := string(pk.Public.Addr()); got != v04ListenerAddr {
+		t.Fatal("restoring a v0.4 key changed the existing address bytes")
+	}
+	private, err := pk.Private.MarshalText()
+	if err != nil || string(private) != "privkey:088e75f612f5ce459a0a7af66830eedae601a59951ba5af0376d4367079b817e" {
+		t.Fatal("restoring a v0.4 key changed the private node identity")
+	}
+	if pk.Public.ServerPublic.NodePublic != pk.Private.Public() {
+		t.Fatal("restored node identity does not match its address")
+	}
+	if !pk.Public.ServerDiscoPublic.Equal(tailcat.DiscoPublicForNode(pk.Private)) {
+		t.Fatal("restored discovery identity does not match the server's derived key")
+	}
+	encoded, err := json.Marshal(pk)
+	if err != nil {
+		t.Fatalf("serialize restored key: %v", err)
+	}
+	back, err := browserListenerKey(string(encoded))
+	if err != nil || !back.Private.Equal(pk.Private) || string(back.Public.Addr()) != v04ListenerAddr {
+		t.Fatalf("persisting and reopening changed the v0.4 identity or address: %v", err)
+	}
+}
+
+func TestBrowserListenerRejectsExistingPSKWithoutDowngrade(t *testing.T) {
+	pk := tailcat.NewPrivateKey()
+	if pk.Public.PresharedKey.IsZero() {
+		t.Fatal("v0.7 fixture did not generate the expected PSK")
+	}
+	encoded, err := json.Marshal(pk)
+	if err != nil {
+		t.Fatalf("serialize PSK fixture: %v", err)
+	}
+	restored, err := browserListenerKey(string(encoded))
+	if restored != nil || err == nil || !strings.Contains(err.Error(), "PSK listener keys are not supported") {
+		t.Fatal("PSK key was not explicitly rejected before listener construction")
+	}
+	secret, _ := pk.Public.PresharedKey.MarshalText()
+	if strings.Contains(err.Error(), string(secret)) {
+		t.Fatal("PSK rejection exposed the secret")
+	}
+	if pk.Public.PresharedKey.IsZero() {
+		t.Fatal("PSK rejection modified the supplied fixture")
+	}
+	if restored, err := browserListenerKey("not-json"); restored != nil || err == nil || !strings.Contains(err.Error(), "parsing privateKey") {
+		t.Fatal("invalid persisted key was not rejected before listener construction")
+	}
+}
+
+func TestPrivateKeyDecodeDoesNotExposeMalformedPSK(t *testing.T) {
+	const secret = "psk:malformed-secret-fixture-only"
+	encoded := strings.Replace(v04ListenerKeyJSON, `"RegionID":304`, `"PresharedKey":"`+secret+`","RegionID":304`, 1)
+	const want = "parsing privateKey: invalid JSON or key encoding"
+	for _, parse := range []struct {
+		name string
+		call func(string) (*tailcat.PrivateKey, error)
+	}{{"decoder", decodeBrowserPrivateKey}, {"listener key", browserListenerKey}} {
+		t.Run(parse.name, func(t *testing.T) {
+			pk, err := parse.call(encoded)
+			if pk != nil || err == nil || err.Error() != want || strings.Contains(err.Error(), secret) {
+				t.Fatal("malformed private key did not produce a fixed, secret-free error")
+			}
+		})
+	}
+	onConnection := js.FuncOf(func(js.Value, []js.Value) any { return nil })
+	defer onConnection.Release()
+	for _, connect := range []struct {
+		name string
+		call func(js.Value, []js.Value) any
+	}{{"listener", tailcatListen}, {"persistent client", tailcatConnect}, {"single dial", tailcatDial}} {
+		t.Run(connect.name, func(t *testing.T) {
+			opts := js.Global().Get("Object").New()
+			opts.Set("addr", v04ListenerAddr)
+			opts.Set("derpMapURL", "https://example.invalid/derpmap.json")
+			opts.Set("privateKey", encoded)
+			opts.Set("onConnection", onConnection)
+			promise := connect.call(js.Undefined(), []js.Value{opts}).(js.Value)
+			if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), secret) {
+				t.Fatal("bridge exposed malformed private-key input or did not reject before networking")
+			}
+		})
+	}
+}
+
 func TestReleaseVersionSourcesAgree(t *testing.T) {
-	const expected = "0.3.0-beta.1"
+	const expected = "0.3.1-beta.1"
 	type manifest struct {
 		Version  string              `json:"version"`
 		Packages map[string]manifest `json:"packages"`

@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -63,15 +62,15 @@ func parseClientOptions(opts js.Value) (clientOptions, error) {
 }
 
 func (o clientOptions) newClient() (*tailcat.Client, error) {
-	server := tailcat.ConnBlob(o.addr)
-	if _, err := tailcat.ParseConnBlob(server); err != nil {
+	server := tailcat.Addr(o.addr)
+	if _, err := tailcat.ParseAddr(server); err != nil {
 		return nil, fmt.Errorf("parsing addr: %w", err)
 	}
 	priv := key.NewNode()
 	if o.keyJSON != "" {
-		var pk tailcat.PrivateKey
-		if err := json.Unmarshal([]byte(o.keyJSON), &pk); err != nil {
-			return nil, fmt.Errorf("parsing privateKey: %w", err)
+		pk, err := decodeBrowserPrivateKey(o.keyJSON)
+		if err != nil {
+			return nil, err
 		}
 		priv = pk.Private
 	}

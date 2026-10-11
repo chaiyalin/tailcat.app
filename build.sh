@@ -7,7 +7,7 @@ if [[ "$out" != "dist" ]]; then
   exit 2
 fi
 
-required_go_version="go1.27.0"
+required_go_version="go1.27.1"
 actual_go_version="$(go env GOVERSION)"
 if [[ "$actual_go_version" != "$required_go_version" ]]; then
   echo "Go $required_go_version is required; found $actual_go_version" >&2
@@ -37,6 +37,11 @@ fi
 group_rooms_js=false
 mobile_group_hosting_js=false
 preview_invites_js=false
+source_sha="$(git rev-parse HEAD)"
+if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "a verifiable Git source SHA is required" >&2
+  exit 2
+fi
 if [[ "$group_rooms_enabled" == "1" ]]; then group_rooms_js=true; fi
 if [[ "$mobile_group_hosting_enabled" == "1" ]]; then mobile_group_hosting_js=true; fi
 if [[ "$preview_invites_enabled" == "1" ]]; then preview_invites_js=true; fi
@@ -45,6 +50,7 @@ printf '%s\n' \
   "globalThis.__TAILCAT_GROUP_BETA__ ??= $group_rooms_js;" \
   "globalThis.__TAILCAT_MOBILE_GROUP_HOSTING__ ??= $mobile_group_hosting_js;" \
   "globalThis.__TAILCAT_PREVIEW_INVITES__ ??= $preview_invites_js;" \
+  "globalThis.__TAILCAT_SOURCE_SHA__ = '$source_sha';" \
   > "$out/runtime-config.js"
 
 GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o "$out/main.wasm" .
@@ -66,4 +72,5 @@ if [[ "${PAGES_BUILD:-}" == "1" ]]; then
   rm -- "$out/main.wasm"
 fi
 
+node scripts/build-manifest.mjs "$out"
 echo "tailcat.app distribution written to $out/"

@@ -333,11 +333,35 @@ func TestTailcatConnectRejectsInvalidArgumentsBeforeNetworkUse(t *testing.T) {
 	}
 
 	privateKey := tailcat.NewPrivateKey()
-	opts.Set("addr", string(privateKey.Public.ConnBlob()))
+	opts.Set("addr", string(privateKey.Public.Addr()))
 	opts.Set("privateKey", "not-json")
 	promise = tailcatConnect(js.Undefined(), []js.Value{opts}).(js.Value)
 	if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), "privateKey") {
 		t.Fatalf("invalid private key error = %v", err)
+	}
+}
+
+func TestClientAcceptsV04AddressAndRetainsSavedNodeIdentity(t *testing.T) {
+	client, err := (clientOptions{addr: v04ListenerAddr, keyJSON: v04ListenerKeyJSON}).newClient()
+	if err != nil {
+		t.Fatalf("construct client for v0.4 address: %v", err)
+	}
+	defer client.Close()
+	if string(client.Server) != v04ListenerAddr {
+		t.Fatal("constructing the client changed the v0.4 address bytes")
+	}
+	pk, err := browserListenerKey(v04ListenerKeyJSON)
+	if err != nil || !client.Key.Equal(pk.Private) {
+		t.Fatal("constructing the client changed the saved node identity")
+	}
+}
+
+func TestTailcatDialRejectsInvalidAddressBeforeNetworkUse(t *testing.T) {
+	opts := js.Global().Get("Object").New()
+	opts.Set("addr", "not-a-tailcat-address")
+	promise := tailcatDial(js.Undefined(), []js.Value{opts}).(js.Value)
+	if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), "parsing addr") {
+		t.Fatalf("invalid address error = %v, want parsing addr", err)
 	}
 }
 

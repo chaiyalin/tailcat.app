@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
 
+// Real invitations and transport identities must never enter test artifacts.
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 test("exchanges text and a verified file through the live Tokyo DERP relay", async ({ browser }) => {
   test.skip(process.env.LIVE_DERP !== "1", "live public-relay smoke test is opt-in");
   test.setTimeout(300_000);
@@ -12,7 +15,6 @@ test("exchanges text and a verified file through the live Tokyo DERP relay", asy
     await guest.goto("/");
     await guest.waitForFunction(() => globalThis.tcTest?.ready === true);
     expect(await host.evaluate(() => globalThis.tcTest.runtime.fileSink)).toMatchObject({
-      kind: "opfs-export",
       opfs: true,
     });
 

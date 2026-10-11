@@ -4,7 +4,7 @@ An unofficial, accountless encrypted browser room built from [Tailcatchat](https
 
 > **Public beta:** public Tailcat DERP relays are rate-limited, best-effort infrastructure with no uptime SLA or throughput target. Do not use this service as the only copy of important data.
 
-> **Release target `0.3.0-beta.1` — limited production beta:** Group Beta is implemented behind the independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` static release switches. Desktop hosting is enabled for the operator-authorized limited rollout; mobile hosting remains off until its real-device gates pass. Disabling either group switch does not affect private one-to-one rooms.
+> **Release target `0.3.1-beta.1` — limited production beta:** This maintenance release pins Tailcat `v0.7.0` and Go `1.27.1`, while retaining legacy-compatible addresses and the deployed room protocols. Group Beta is implemented behind independent `groupRoomsEnabled` and `mobileGroupHostingEnabled` switches. Desktop hosting remains enabled for the authorized limited rollout; mobile hosting remains off until its real-device gates pass. See [upstream synchronization](UPSTREAM.md) for compatibility and release evidence.
 
 tailcat.app supports temporary text, file, and voice-note transfers while participants are online. Private rooms also support WebRTC voice/video calls and screen sharing; Group Beta does not. There is no account, application database, server-side file store, offline delivery, cloud chat history, recovery service, content moderation, or malware scanning. An eligible private-room file of up to and including 100 MiB may be staged automatically in this origin's private browser storage, then exposed after verification for a user-initiated open, save, share, or delete action.
 
@@ -76,7 +76,7 @@ For OPFS receive, the app uses a random transfer identifier rather than the offe
 
 ## Build locally
 
-The release toolchain is fixed at Go `1.27.0`. The repository has no Node build step and all browser assets are local.
+The release toolchain is fixed at Go `1.27.1`. Node generates the public source/asset manifest; browser assets are local and require no bundler.
 
 ```sh
 go version
@@ -139,9 +139,9 @@ Connect the public GitHub repository `chaiyalin/tailcat.app` to a Pages project 
 | Build system | Version 3 |
 | Build command | `PAGES_BUILD=1 ./build.sh dist` |
 | Build output directory | `dist` |
-| Environment variables | `GO_VERSION=1.27.0`, `SKIP_DEPENDENCY_INSTALL=1` |
+| Environment variables | `GO_VERSION=1.27.1`, `SKIP_DEPENDENCY_INSTALL=1` |
 
-The limited production Group Beta artifact sets `TAILCAT_GROUP_ROOMS_ENABLED=1`, `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=0`, and `TAILCAT_PREVIEW_INVITES=0`. Setting the group switch back to `0` is the production kill switch. For an Access-protected branch preview, set `TAILCAT_GROUP_ROOMS_ENABLED=1` and `TAILCAT_PREVIEW_INVITES=1`; enable `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=1` only while running the mobile-host gate. `build.sh` accepts only `0` or `1`, rejects mobile hosting without group rooms, and generates the public `runtime-config.js` artifact. No secret belongs in these variables or that file.
+The limited production Group Beta artifact sets `TAILCAT_GROUP_ROOMS_ENABLED=1`, `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=0`, and `TAILCAT_PREVIEW_INVITES=0`. Setting the group switch back to `0` is the production kill switch. For an isolated public branch preview authorized by the operator, set `TAILCAT_GROUP_ROOMS_ENABLED=1` and `TAILCAT_PREVIEW_INVITES=1`; enable `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=1` only while running the mobile-host gate. `build.sh` accepts only `0` or `1`, rejects mobile hosting without group rooms, and generates the public `runtime-config.js` artifact. No secret belongs in these variables or that file.
 
 A local preview-equivalent artifact can be built with:
 
@@ -159,10 +159,10 @@ The build output must contain `_headers`, `404.html`, `robots.txt`, the legal pa
 
 ### Domain and operations checklist
 
-1. Protect preview deployments with Cloudflare Access and complete two-browser acceptance testing on a preview URL.
+1. Complete two-browser acceptance testing on an isolated public preview URL; retain noindex and do not bind the production domain.
 2. Add `tailcat.app` from **Pages → Custom domains** so Pages creates the DNS record and certificate. Do not pre-create a root CNAME.
 3. Create a Cloudflare Redirect Rule for `www.tailcat.app` to `https://tailcat.app` with path and query preserved.
-4. Redirect the production `tailcat-app.pages.dev` hostname to the canonical domain while keeping branch preview hostnames protected by Access.
+4. Redirect the production `tailcat-app.pages.dev` hostname to the canonical domain while keeping branch previews separate from production.
 5. Keep Cloudflare Web Analytics and any browser-injected analytics disabled for the initial beta.
 6. Enable Cloudflare Email Routing for `abuse@tailcat.app`, forward it to the verified operator mailbox, and test receipt in both directions.
 7. Confirm HTTPS is active, the `www` redirect preserves paths, missing paths return the real `404.html` with status 404, `/main.wasm` returns 404, `/main.wasm.gz` is below 25 MiB and has no `Content-Encoding`, and `https://tailcat.dev/derpmap.json` returns JSON without CSP/CORS errors.
@@ -175,15 +175,15 @@ Automated and real-device tests must preserve the private-room gates for handsha
 
 Desktop Chrome and Edge should each complete a 1 GiB transfer on Windows and macOS. Android Chrome 132 and the current Android Chrome must complete at least 100 MiB plus voice-note and video tests. iOS Safari 17/18 and the current Safari must verify, export, and clean up at least a 100 MiB incoming file. Android-to-iPhone tests cover both file directions, text, voice notes, video, mobile receipt of desktop screen sharing, save cancellation, lock/background behavior, network switching, and STUN failure. Firefox and non-target mobile browsers must show the correct incompatible or limited state. Regional checks should cover public DERP behavior on China Mobile, China Unicom, and China Telecom without assuming any relay has an SLA.
 
-Group Beta adds an Access-protected preview gate at 3, 6, and then 10 people. The 10-browser gate runs for 60 minutes over real public DERP, sends a 1 MiB file to nine recipients and a 100 MiB file to two recipients with verification, exercises network switching and reconnect, and checks that connection/stream/heap resources are reclaimed across 20 cycles. Android Chrome and iOS Safari must each host nine participants in the foreground for 30 minutes and pass wake-lock failure, background pause, 120-second recovery, and timeout shutdown checks.
+Group Beta adds an isolated preview gate at 3, 6, and then 10 people. The 10-browser gate runs for 60 minutes over real public DERP, sends a 1 MiB file to nine recipients and a 100 MiB file to two recipients with verification, exercises network switching and reconnect, and checks that connection/stream/heap resources are reclaimed across 20 cycles. Android Chrome and iOS Safari must each host nine participants in the foreground for 30 minutes and pass wake-lock failure, background pause, 120-second recovery, and timeout shutdown checks.
 
-Release sequence: Access-protected preview from `feature/group-rooms-v2` → 3/6/10-person gates → public-DERP and real-device gates → merge to `main` → tag `app-v0.3.0-beta.1`. The operator-authorized limited production rollout currently enables desktop-hosted Group Beta before the outstanding external gates are recorded complete; mobile hosting remains off and the release must not be tagged until those gates pass. Cloudflare Pages rollback or either static switch can disable Group Beta without affecting private rooms.
+Maintenance release sequence: public isolated preview from `sync/upstream-2026-10-11` → legacy/new-page and persistent-key interoperability → full automated checks → production deployment with unchanged rollout switches. Create tag `app-v0.3.1-beta.1` only after the outstanding real-device and observation gates pass. The authorized limited production rollout enables desktop-hosted Group Beta; mobile hosting remains off. Cloudflare Pages rollback or either group switch can disable Group Beta without affecting private rooms.
 
 Group diagnostics contain no invitation, token, Tailcat address, nickname, message, file name, content, or IP address. If operational diagnostics are enabled, they are limited to an anonymous run identifier, member count, latency, error category, byte count, and resource counts.
 
 ## Upstream and dependency policy
 
-Production pins `github.com/tailscale/tailcat` to release `v0.4.0`; it never tracks `main` automatically. Tailcat makes no API, CLI, or wire-format stability promise, so every upgrade happens on a dedicated branch and must pass old/new-page interoperability and persistent-key migration tests. See [UPSTREAM.md](UPSTREAM.md) for the update procedure.
+Production pins `github.com/tailscale/tailcat` to release `v0.7.0`; it never tracks `main` automatically. Listener keys use the upstream explicit no-PSK compatibility mode so existing v0.4 pages and saved addresses continue to work. A saved key already containing a PSK is rejected explicitly rather than silently changed. Tailcat makes no API, CLI, or wire-format stability promise, so every upgrade happens on a dedicated branch and must pass old/new-page interoperability and persistent-key tests. See [UPSTREAM.md](UPSTREAM.md).
 
 ## License
 

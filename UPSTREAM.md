@@ -23,16 +23,18 @@ Never force-push `main` to synchronize upstream. Review and integrate upstream c
 
 ## Pinned production baseline
 
-- Tailcatchat fork baseline: the audited commit recorded by Git history when this fork was created.
-- Tailcat Go module: release `v0.4.0` exactly.
-- Go toolchain: `1.27.0`.
-- Group Beta release target: `app-v0.3.0-beta.1` after the protected-preview, public-DERP, and real-device gates pass.
+- Tailcatchat upstream: `c170a675bf3ecc7b8d7d852219c65c0bdbe3aaf0`; unchanged as of 2026-10-11.
+- Application baseline: the deployed `0.3.0-beta.1` source `9df79d476d22cdab53cf92a996becf412ff47545`.
+- Tailcat Go module: release `v0.7.0`, tag commit `15ab9e68bfc6534a61797d7af28cedd42b54a3a5`.
+- Tailscale dependency: `v1.103.0-pre.0.20260916030321-a2263542f260`, as selected by the Tailcat release.
+- Go toolchain: `1.27.1`.
+- Maintenance candidate: `0.3.1-beta.1`; final tag remains gated by real-device and observation evidence.
 
 `go.mod` and `go.sum` are the source of truth for the resolved dependency graph. Do not replace the Tailcat release with `@main`, a floating branch, or an unreviewed pseudo-version.
 
 ## Updating Tailcatchat upstream
 
-1. Start from an up-to-date local `main` and create a branch named for the reviewed upstream commit, for example `upstream/tailcatchat-YYYYMMDD`.
+1. Resolve the actual deployed source and an up-to-date `main`; preserve any already deployed source not yet archived in main. Create an isolated branch named for the reviewed upstream version/date.
 2. Fetch `upstream` and inspect its commits and diff from the recorded fork baseline.
 3. Cherry-pick or merge only after reviewing changes to browser permissions, invite handling, Tailcat addresses, WebRTC signaling, storage, build artifacts, licenses, and deployment workflow.
 4. Preserve the repository-root BSD 3-Clause license and this upstream copyright notice:
@@ -76,4 +78,51 @@ The local QR generator is currently `uqr v0.1.3`, vendored as `web/vendor/uqr.js
 
 ## Release evidence
 
-Keep the reviewed upstream commit, Tailcat version, Go version, dependency verification result, compressed WASM size, browser matrix results, protocol interoperability result, and Access-protected Cloudflare preview URL with the release notes. Create `app-v0.3.0-beta.1` only after every deployment and observation gate in `README.md` is complete; deterministic CI alone is not sufficient.
+Keep the reviewed upstream commit, Tailcat version, Go version, dependency verification result, compressed WASM size, browser matrix results, protocol interoperability result, and public isolated preview URL with the release notes. Preview is operator-authorized without Access and retains noindex. Create `app-v0.3.1-beta.1` only after the outstanding real-device and observation gates pass; deterministic CI alone is not sufficient.
+
+## 2026-10-11 synchronization
+
+[Tailcat v0.7.0](https://github.com/tailscale/tailcat/releases/tag/v0.7.0)
+contains 52 commits since v0.4.0, including meow/Ping retry, TCP teardown,
+WireGuard buffering and gVisor congestion/recovery improvements. These are
+upstream implementation changes, not measured browser speed claims.
+Tailcatchat has no new commits to integrate. The existing `tsdial` close fix
+from `72780705eda8` remains present in the selected Tailscale dependency.
+
+v0.6 introduced default WireGuard preshared keys. This maintenance release
+explicitly retains the existing address format: newly generated listener keys
+have a zero PSK, and the server uses `DisablePresharedKey: true`. Existing
+v0.4 private-key JSON is restored without changing node identity or address.
+Previously stored nonzero-PSK keys are rejected explicitly. This preserves
+the prior WireGuard security model and old/new-page interoperability; the
+new PSK feature needs its own migration release before it can be enabled.
+
+The deprecated `ConnBlob` API is replaced with `Addr`/`ParseAddr`. Application
+protocols TCH1/TCF1/TCG1/TCV1, consent, streaming hashes, local storage and room
+limits remain unchanged. Production group hosting stays desktop-only. The
+unfinished native-file preview and the separate game/rooms worktrees are not
+included in this maintenance production rollout.
+
+[Tailscale PR #21030](https://github.com/tailscale/tailscale/pull/21030)
+remains Draft and unmerged, with head `35a6fabf9d004f288406ebba28e446cdbfc96d4b`.
+It is not imported. Tailcat main commits after v0.7.0 and unrelated Tailscale
+release upgrades are also excluded from the fixed release dependency graph.
+
+The previous native-preview CI failure was a wall-clock watchdog running
+while WASM initialization blocked the browser event loop. Its controller
+test now waits for readiness and advances a controlled clock, while keeping
+the 25 ms business timeout and resource-cleanup assertions.
+
+Builds publish `build-manifest.json` with exact dependency versions, source
+SHA, dirty status and per-asset SHA-256. Only clean committed builds may be
+deployed. Runtime configuration carries the same source SHA.
+
+All private-key JSON parsing paths return a fixed error rather than an
+upstream error that could echo malformed key material. Listener, persistent
+Client and one-shot dial tests verify rejection before any network request.
+
+The production Pages build environment explicitly records Go `1.27.1`,
+`TAILCAT_GROUP_ROOMS_ENABLED=1`, `TAILCAT_MOBILE_GROUP_HOSTING_ENABLED=0` and
+`TAILCAT_PREVIEW_INVITES=0`, matching the deployed feature selection. This
+sync branch is excluded from the production project's automatic branch
+previews; its separate public project is `tailcat-app-upstream-sync`.

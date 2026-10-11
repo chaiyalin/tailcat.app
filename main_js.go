@@ -89,14 +89,9 @@ func tailcatListen(this js.Value, args []js.Value) any {
 		if regionErr != nil {
 			return nil, regionErr
 		}
-		pk := &tailcat.PrivateKey{}
-		if keyJSON != "" {
-			if err := json.Unmarshal([]byte(keyJSON), pk); err != nil {
-				return nil, fmt.Errorf("parsing privateKey: %w", err)
-			}
-		} else {
-			pk = tailcat.NewPrivateKey()
-			pk.Public.RegionID = -1 // auto-select
+		pk, err := browserListenerKey(keyJSON)
+		if err != nil {
+			return nil, err
 		}
 		if hasRequestedRegion {
 			// An explicit selection overrides the region stored with a
@@ -119,17 +114,18 @@ func tailcatListen(this js.Value, args []js.Value) any {
 		// persisted key keep using the same relay across page loads.
 		pk.Public.Region = nil
 		pk.Public.RegionID = reg.RegionID
-		blob := pk.Public.ConnBlob()
+		addr := pk.Public.Addr()
 		keyOut, err := json.Marshal(pk)
 		if err != nil {
 			return nil, err
 		}
 
 		srv := &tailcat.Server{
-			Key:            pk.Private,
-			Logf:           logf,
-			Region:         reg,
-			ServedTCPPorts: []filter.PortRange{{First: firstAppTCPPort, Last: lastAppTCPPort}},
+			Key:                 pk.Private,
+			DisablePresharedKey: true,
+			Logf:                logf,
+			Region:              reg,
+			ServedTCPPorts:      []filter.PortRange{{First: firstAppTCPPort, Last: lastAppTCPPort}},
 		}
 		srv.OnTCP = func(port uint16) (handler func(net.Conn)) {
 			if !isAppTCPPort(port) {
@@ -172,7 +168,7 @@ func tailcatListen(this js.Value, args []js.Value) any {
 			})
 			return nil
 		})
-		object.Set("addr", string(blob))
+		object.Set("addr", string(addr))
 		object.Set("privateKeyJSON", string(keyOut))
 		object.Set("regionID", int(reg.RegionID))
 		object.Set("regionName", reg.RegionName)
@@ -180,6 +176,38 @@ func tailcatListen(this js.Value, args []js.Value) any {
 		object.Set("close", closeFunc)
 		return object, nil
 	})
+}
+
+// browserListenerKey preserves the v0.4 addresses and identities shared by the
+// production app. Tailcat v0.6+ generates a WireGuard pre-shared key by default;
+// new browser rooms deliberately retain the existing no-PSK wire format until
+// old pages have been retired. A supplied PSK key must never be silently
+// downgraded, because its owner may be relying on that additional secret.
+func browserListenerKey(keyJSON string) (*tailcat.PrivateKey, error) {
+	if keyJSON == "" {
+		pk := tailcat.NewPrivateKey()
+		pk.Public.PresharedKey = tailcat.PresharedKey{}
+		pk.Public.RegionID = -1 // auto-select
+		return pk, nil
+	}
+	pk, err := decodeBrowserPrivateKey(keyJSON)
+	if err != nil {
+		return nil, err
+	}
+	if !pk.Public.PresharedKey.IsZero() {
+		return nil, errors.New("PSK listener keys are not supported by the compatible browser release; use a temporary room or restore a saved address without a PSK")
+	}
+	return pk, nil
+}
+
+// Key decoders may include the malformed secret in their errors. Never return
+// those errors to JavaScript, where the app displays and retains diagnostics.
+func decodeBrowserPrivateKey(keyJSON string) (*tailcat.PrivateKey, error) {
+	var pk tailcat.PrivateKey
+	if err := json.Unmarshal([]byte(keyJSON), &pk); err != nil {
+		return nil, errors.New("parsing privateKey: invalid JSON or key encoding")
+	}
+	return &pk, nil
 }
 
 func isAppTCPPort(port uint16) bool {
@@ -319,16 +347,20 @@ func tailcatDial(this js.Value, args []js.Value) any {
 		if addr == "" {
 			return nil, errors.New("addr is required")
 		}
+		server := tailcat.Addr(addr)
+		if _, err := tailcat.ParseAddr(server); err != nil {
+			return nil, fmt.Errorf("parsing addr: %w", err)
+		}
 		priv := key.NewNode()
 		if keyJSON != "" {
-			var pk tailcat.PrivateKey
-			if err := json.Unmarshal([]byte(keyJSON), &pk); err != nil {
-				return nil, fmt.Errorf("parsing privateKey: %w", err)
+			pk, err := decodeBrowserPrivateKey(keyJSON)
+			if err != nil {
+				return nil, err
 			}
 			priv = pk.Private
 		}
 		cl := &tailcat.Client{
-			Server:     tailcat.ConnBlob(addr),
+			Server:     server,
 			Key:        priv,
 			Logf:       logf,
 			DERPMapURL: derpMapURL,
