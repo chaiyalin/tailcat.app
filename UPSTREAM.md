@@ -126,3 +126,17 @@ The production Pages build environment explicitly records Go `1.27.1`,
 `TAILCAT_PREVIEW_INVITES=0`, matching the deployed feature selection. This
 sync branch is excluded from the production project's automatic branch
 previews; its separate public project is `tailcat-app-upstream-sync`.
+
+All static responses retain revalidation and add `Cache-Control: no-transform`.
+This prevents Cloudflare's default email-obfuscation HTML/script injection
+without changing zone-wide settings or other sites. The deployed HTML must
+match the build manifest and contain no injected decode/analytics script.
+
+Real-network acceptance also exposed a pre-existing startup/close deadlock:
+network shutdown inside a `syscall/js.FuncOf` callback could wait for WebSocket
+events while blocking their JavaScript event loop. Listener, session and stream
+wrappers now synchronously invalidate state and release callbacks, then perform
+physical shutdown on Go goroutines. One-shot cleanup retains stream-before-client
+ordering; stopped listeners reject late handlers. Blocking-close unit fixtures
+require real JavaScript timers to make progress, and the live lifecycle gate
+checks immediate close, legacy identity restoration and WebSocket reclamation.

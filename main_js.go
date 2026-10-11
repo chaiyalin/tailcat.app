@@ -21,6 +21,7 @@ import (
 	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall/js"
 	"time"
 
@@ -127,55 +128,60 @@ func tailcatListen(this js.Value, args []js.Value) any {
 			Region:              reg,
 			ServedTCPPorts:      []filter.PortRange{{First: firstAppTCPPort, Last: lastAppTCPPort}},
 		}
+		var stopped atomic.Bool
 		srv.OnTCP = func(port uint16) (handler func(net.Conn)) {
 			if !isAppTCPPort(port) {
 				return nil
 			}
-			return func(c net.Conn) {
-				onConnection.Invoke(makeJSConn(c, port, nil))
-			}
+			return listenerConnectionHandler(&stopped, onConnection, port)
 		}
 		if err := srv.Start(); err != nil {
 			srv.Close()
 			return nil, fmt.Errorf("Server.Start: %w", err)
 		}
-		// Keep close idempotent for the JavaScript API, but drop the heavy
-		// server reference after the first call. The small close callback can
-		// safely remain callable without retaining the netstack and OnTCP
-		// callback for every stopped/reopened room.
-		var (
-			closeOnce sync.Once
-			serverMu  sync.Mutex
-			server    = srv
-			closeFunc js.Func
-		)
 		object := js.Global().Get("Object").New()
-		closedClose := js.Global().Get("Boolean")
-		closeFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
-			closeOnce.Do(func() {
-				serverMu.Lock()
-				current := server
-				server = nil
-				serverMu.Unlock()
-				if current != nil {
-					_ = current.Close()
-				}
-				// Never leave a released Go callback reachable. The native
-				// Boolean function is a harmless, idempotent close shim.
-				object.Set("close", closedClose)
-				closeFunc.Release()
-				closeFunc = js.Func{}
-			})
-			return nil
-		})
+		attachJSListenerClose(object, srv, &stopped)
 		object.Set("addr", string(addr))
 		object.Set("privateKeyJSON", string(keyOut))
 		object.Set("regionID", int(reg.RegionID))
 		object.Set("regionName", reg.RegionName)
 		object.Set("regionCode", reg.RegionCode)
-		object.Set("close", closeFunc)
 		return object, nil
 	})
+}
+
+func listenerConnectionHandler(stopped *atomic.Bool, onConnection js.Value, port uint16) func(net.Conn) {
+	return func(c net.Conn) {
+		if stopped.Load() {
+			go c.Close()
+			return
+		}
+		onConnection.Invoke(makeJSConn(c, port, nil))
+	}
+}
+
+// Closing the network stack can await a browser WebSocket close event, even
+// when startup has only just returned. A FuncOf callback must not block that
+// event loop. Invalidate this listener synchronously, then finish its own
+// captured server cleanup on a Go goroutine without retaining JS callbacks.
+func attachJSListenerClose(object js.Value, server io.Closer, stopped *atomic.Bool) {
+	var once sync.Once
+	var closeFunc js.Func
+	closeFunc = js.FuncOf(func(js.Value, []js.Value) any {
+		once.Do(func() {
+			stopped.Store(true)
+			current := server
+			server = nil
+			object.Set("close", js.Global().Get("Boolean"))
+			closeFunc.Release()
+			closeFunc = js.Func{}
+			if current != nil {
+				go func() { _ = current.Close() }()
+			}
+		})
+		return nil
+	})
+	object.Set("close", closeFunc)
 }
 
 // browserListenerKey preserves the v0.4 addresses and identities shared by the
@@ -376,7 +382,7 @@ func tailcatDial(this js.Value, args []js.Value) any {
 			cl.Close()
 			return nil, fmt.Errorf("DialTCPPort: %w", err)
 		}
-		return makeJSConn(c, port, func() { cl.Close() }), nil
+		return makeJSConnWithCleanup(c, port, nil, func() { _ = cl.Close() }), nil
 	})
 }
 
@@ -412,6 +418,14 @@ func pingUntil(ctx context.Context, cl *tailcat.Client) error {
 // payload bytes into the browser. Omitting maxBytes preserves the 64 KiB
 // default. A fast sender stalls on TCP backpressure rather than filling memory.
 func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
+	return makeJSConnWithCleanup(c, port, onClose, nil)
+}
+
+// onClose is a synchronous, non-blocking state cleanup (for example releasing
+// a session stream reservation). Network shutdown and afterNetworkClose run
+// outside the JS callback, in order, so a one-shot Client is not torn down
+// before its stream has been closed.
+func makeJSConnWithCleanup(c net.Conn, port uint16, onClose, afterNetworkClose func()) js.Value {
 	buf := make([]byte, 64<<10)
 	object := js.Global().Get("Object").New()
 	promise := js.Global().Get("Promise")
@@ -429,6 +443,7 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 		writeMu     sync.Mutex
 		conn        = c
 		cleanup     = onClose
+		networkEnd  = afterNetworkClose
 		readFunc    js.Func
 		writeFunc   js.Func
 		closeWFunc  js.Func
@@ -449,13 +464,9 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 			conn = nil
 			after := cleanup
 			cleanup = nil
+			finish := networkEnd
+			networkEnd = nil
 			connMu.Unlock()
-			if current != nil {
-				_ = current.Close()
-			}
-			if after != nil {
-				after()
-			}
 			// Replace every method before releasing its Go registration. Native
 			// shims preserve deterministic post-close behavior without growing
 			// syscall/js's callback table across room and transfer cycles.
@@ -473,6 +484,19 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 				closeWFunc = js.Func{}
 				closeFunc = js.Func{}
 			})
+			if after != nil {
+				after()
+			}
+			if current != nil || finish != nil {
+				go func() {
+					if current != nil {
+						_ = current.Close()
+					}
+					if finish != nil {
+						finish()
+					}
+				}()
+			}
 		})
 	}
 	readFunc = js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -499,6 +523,9 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 				return nil, err
 			}
 			n, err := current.Read(buf[:limit])
+			if _, closedErr := currentConn(); closedErr != nil {
+				return nil, closedErr
+			}
 			if n > 0 {
 				u8 := js.Global().Get("Uint8Array").New(n)
 				if copied := js.CopyBytesToJS(u8, buf[:n]); copied != n {
@@ -536,6 +563,9 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 				if n == 0 {
 					return nil, io.ErrNoProgress
 				}
+				if _, err := currentConn(); err != nil {
+					return nil, err
+				}
 			}
 			return js.Undefined(), nil
 		})
@@ -553,6 +583,9 @@ func makeJSConn(c net.Conn, port uint16, onClose func()) js.Value {
 				return nil, errors.New("connection does not support half-close")
 			}
 			if err := cw.CloseWrite(); err != nil {
+				return nil, err
+			}
+			if _, err := currentConn(); err != nil {
 				return nil, err
 			}
 			return js.Undefined(), nil

@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall/js"
 	"testing"
 	"time"
@@ -294,8 +295,9 @@ func TestJSConnWritesAllAndClosesIdempotently(t *testing.T) {
 	}
 	wrapped.Get("close").Invoke()
 	wrapped.Get("close").Invoke()
-	if !c.closed || closedCallbacks != 1 {
-		t.Fatalf("closed = %v, callbacks = %d; want true, 1", c.closed, closedCallbacks)
+	waitForCleanup(t, c.closed.Load)
+	if !c.closed.Load() || closedCallbacks != 1 {
+		t.Fatalf("closed = %v, callbacks = %d; want true, 1", c.closed.Load(), closedCallbacks)
 	}
 }
 
@@ -367,8 +369,9 @@ func TestJSConnCloseUsesNativeShimsAcrossCycles(t *testing.T) {
 		wrapped := makeJSConn(connection, 104, func() { closedCallbacks++ })
 		wrapped.Get("close").Invoke()
 
-		if !connection.closed || closedCallbacks != 1 {
-			t.Fatalf("cycle %d closed = %v, callbacks = %d; want true, 1", cycle, connection.closed, closedCallbacks)
+		waitForCleanup(t, connection.closed.Load)
+		if !connection.closed.Load() || closedCallbacks != 1 {
+			t.Fatalf("cycle %d closed = %v, callbacks = %d; want true, 1", cycle, connection.closed.Load(), closedCallbacks)
 		}
 		if !wrapped.Get("close").Equal(js.Global().Get("Boolean")) {
 			t.Fatalf("cycle %d close did not become the native idempotent shim", cycle)
@@ -393,9 +396,190 @@ func TestJSConnCloseUsesNativeShimsAcrossCycles(t *testing.T) {
 	}
 }
 
+func TestListenerCloseAllowsJSEventsAndIsolatesInstances(t *testing.T) {
+	gate := make(chan struct{})
+	server := newEventBlockingCloser(gate)
+	object := js.Global().Get("Object").New()
+	var stopped atomic.Bool
+	attachJSListenerClose(object, server, &stopped)
+
+	otherServer := newEventBlockingCloser(gate)
+	otherObject := js.Global().Get("Object").New()
+	var otherStopped atomic.Bool
+	attachJSListenerClose(otherObject, otherServer, &otherStopped)
+
+	timer, release := releaseOnJSTimer(gate, server.started)
+	defer release()
+	object.Get("close").Invoke()
+	object.Get("close").Invoke()
+	if !stopped.Load() || !object.Get("close").Equal(js.Global().Get("Boolean")) {
+		t.Fatal("listener close did not synchronously invalidate its own callback")
+	}
+	if otherStopped.Load() || otherServer.calls.Load() != 0 {
+		t.Fatal("closing one listener changed a newer listener instance")
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("JS timer could not run during server cleanup: %v", err)
+	}
+	waitForCleanup(t, server.finished)
+	if server.calls.Load() != 1 {
+		t.Fatal("listener server was not closed exactly once")
+	}
+	otherObject.Get("close").Invoke()
+	waitForCleanup(t, otherServer.finished)
+	if !otherStopped.Load() || otherServer.calls.Load() != 1 {
+		t.Fatal("second listener was not independently cleaned up")
+	}
+}
+
+func TestStoppedListenerRejectsLateConnectionWithoutBlockingJS(t *testing.T) {
+	gate := make(chan struct{})
+	closer := newEventBlockingCloser(gate)
+	connection := &eventBlockingConn{closer: closer}
+	var stopped atomic.Bool
+	stopped.Store(true)
+	invocations := 0
+	onConnection := js.FuncOf(func(js.Value, []js.Value) any { invocations++; return nil })
+	defer onConnection.Release()
+	handler := listenerConnectionHandler(&stopped, onConnection.Value, 104)
+	timer, release := releaseOnJSTimer(gate, closer.started)
+	defer release()
+	// Exercise the handler inside an actual JS callback, as with dispatch from
+	// the WASM network stack. Closing the late raw stream must not block JS.
+	dispatch := js.FuncOf(func(js.Value, []js.Value) any { handler(connection); return nil })
+	dispatch.Invoke()
+	dispatch.Release()
+	if invocations != 0 {
+		t.Fatal("stopped listener invoked the retired onConnection callback")
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("late-stream cleanup blocked JS timer: %v", err)
+	}
+	waitForCleanup(t, closer.finished)
+	if closer.calls.Load() != 1 {
+		t.Fatal("late incoming connection was not closed exactly once")
+	}
+}
+
+func TestJSConnCloseAllowsEventsAndSerializesOwnedClientCleanup(t *testing.T) {
+	gate := make(chan struct{})
+	streamClose := newEventBlockingCloser(gate)
+	clientClose := newEventBlockingCloser(gate)
+	connection := &eventBlockingConn{closer: streamClose}
+	stateCleanup := 0
+	wrapped := makeJSConnWithCleanup(connection, 102, func() { stateCleanup++ }, func() {
+		if !streamClose.finished() {
+			t.Error("owned client shutdown began before raw stream shutdown finished")
+		}
+		_ = clientClose.Close()
+	})
+	timer, release := releaseOnJSTimer(gate, streamClose.started)
+	defer release()
+	wrapped.Get("close").Invoke()
+	wrapped.Get("close").Invoke()
+	if stateCleanup != 1 || !wrapped.Get("close").Equal(js.Global().Get("Boolean")) {
+		t.Fatal("stream callback/quota cleanup was not synchronous and idempotent")
+	}
+	if clientClose.calls.Load() != 0 {
+		t.Fatal("owned client shutdown did not wait for raw stream shutdown")
+	}
+	for _, method := range []string{"read", "write", "closeWrite"} {
+		var promise js.Value
+		if method == "write" {
+			promise = wrapped.Get(method).Invoke(js.Global().Get("Uint8Array").New(1))
+		} else {
+			promise = wrapped.Get(method).Invoke()
+		}
+		if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), "closed") {
+			t.Fatalf("%s did not reject immediately after logical close", method)
+		}
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("stream close blocked JS timer: %v", err)
+	}
+	waitForCleanup(t, clientClose.finished)
+	if streamClose.calls.Load() != 1 || clientClose.calls.Load() != 1 || stateCleanup != 1 {
+		t.Fatal("stream or owned client cleanup did not occur exactly once")
+	}
+}
+
+// The physical closer deliberately cannot finish until a JavaScript timer
+// releases its gate. A synchronous FuncOf close would deadlock this test by
+// preventing that timer from executing, matching browser WebSocket shutdown.
+type eventBlockingCloser struct {
+	calls   atomic.Int32
+	gate    <-chan struct{}
+	started chan struct{}
+	done    chan struct{}
+}
+
+func newEventBlockingCloser(gate <-chan struct{}) *eventBlockingCloser {
+	return &eventBlockingCloser{gate: gate, started: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (c *eventBlockingCloser) Close() error {
+	first := c.calls.Add(1) == 1
+	if first {
+		close(c.started)
+	}
+	<-c.gate
+	if first {
+		close(c.done)
+	}
+	return nil
+}
+
+func (c *eventBlockingCloser) finished() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+type eventBlockingConn struct {
+	shortWriteConn
+	closer *eventBlockingCloser
+}
+
+func (c *eventBlockingConn) Close() error { return c.closer.Close() }
+
+func releaseOnJSTimer(gate chan struct{}, started ...<-chan struct{}) (js.Value, func()) {
+	ready := js.FuncOf(func(js.Value, []js.Value) any {
+		for _, signal := range started {
+			select {
+			case <-signal:
+			default:
+				return false
+			}
+		}
+		return true
+	})
+	free := js.FuncOf(func(js.Value, []js.Value) any { close(gate); return nil })
+	factory := js.Global().Get("Function").New("ready", "free", `return new Promise(resolve => {
+  const timer = setInterval(() => {
+    if (!ready()) return;
+    clearInterval(timer); free(); resolve();
+  }, 1);
+});`)
+	return factory.Invoke(ready, free), func() { ready.Release(); free.Release() }
+}
+
+func waitForCleanup(t *testing.T, complete func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !complete() {
+		if time.Now().After(deadline) {
+			t.Fatal("physical network cleanup did not complete")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 type shortWriteConn struct {
 	written     []byte
-	closed      bool
+	closed      atomic.Bool
 	writeClosed bool
 }
 
@@ -417,7 +601,7 @@ func (c *limitedReadConn) Read(p []byte) (int, error) {
 
 func (c *shortWriteConn) Read([]byte) (int, error) { return 0, io.EOF }
 func (c *shortWriteConn) Write(p []byte) (int, error) {
-	if c.closed {
+	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
 	n := min(2, len(p))
@@ -425,7 +609,7 @@ func (c *shortWriteConn) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (c *shortWriteConn) CloseWrite() error                { c.writeClosed = true; return nil }
-func (c *shortWriteConn) Close() error                     { c.closed = true; return nil }
+func (c *shortWriteConn) Close() error                     { c.closed.Store(true); return nil }
 func (c *shortWriteConn) LocalAddr() net.Addr              { return testAddr("local") }
 func (c *shortWriteConn) RemoteAddr() net.Addr             { return testAddr("remote") }
 func (c *shortWriteConn) SetDeadline(time.Time) error      { return nil }

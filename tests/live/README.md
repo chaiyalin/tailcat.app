@@ -35,8 +35,9 @@ required, keeping this gate focused on stable dependency interoperability.
 Those counters are encrypted transport totals, not a precise per-file bandwidth
 attribution measurement. This script does not evaluate native WebRTC success.
 
-If a build manifest exposes dependency metadata, the candidate must report
-`v0.7.0` and production `v0.4.0`. Missing metadata is explicitly reported as
+The candidate must expose a clean build manifest with source SHA and
+`v0.7.0`; production must report `v0.4.0` if its manifest exists.
+Missing legacy production metadata is explicitly reported as
 `provenanceVerified: false`; a transport pass alone does not prove which
 dependency was deployed. Pair the report with the release build manifest and
 source SHA checks.
@@ -50,3 +51,15 @@ metadata. A failed case exits with code 1 after the remaining cases run.
 
 This is small-file release smoke coverage. It does not replace real Android/iOS,
 cross-network interruption, 100 MiB/1 GiB, memory-pressure or endurance gates.
+
+`persistence-lifecycle.mjs` separately restores a disposable identity from the
+immutable legacy production deployment, checks unchanged address bytes, and
+immediately closes five candidate listeners. It requires responsive browser
+timers, idempotent native close shims, and zero remaining official WebSockets:
+
+```sh
+LIVE_PERSISTENCE_LIFECYCLE=1 TAILCAT_CANDIDATE_URL=https://YOUR-CANDIDATE.pages.dev/ node tests/live/persistence-lifecycle.mjs
+```
+
+Only the disposable legacy context is destroyed; its known blocking startup
+close is not reused. All candidate lifecycle operations have explicit deadlines.

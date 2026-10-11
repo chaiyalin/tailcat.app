@@ -62,6 +62,11 @@ func TestJSSessionDialAndClose(t *testing.T) {
 	if _, err := awaitPromise(session.Get("dial").Invoke(dialOptions(104))); err == nil {
 		t.Fatal("dial after close succeeded")
 	}
+	waitForCleanup(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.closeCalls == 1 && len(client.connections) == 1 && client.connections[0].isClosed()
+	})
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -111,6 +116,11 @@ func TestSessionCloseUnblocksPendingDial(t *testing.T) {
 	if _, err := awaitPromise(pending); err == nil {
 		t.Fatal("pending dial resolved after close; want rejection")
 	}
+	waitForCleanup(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.closeCalls == 1
+	})
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -134,10 +144,64 @@ func TestSessionCloseWinsSuccessfulDialRace(t *testing.T) {
 	if _, err := awaitPromise(pending); err == nil || !strings.Contains(err.Error(), "closed while dialing") {
 		t.Fatalf("racing dial error = %v, want closed-while-dialing rejection", err)
 	}
+	waitForCleanup(t, client.conn.isClosed)
 	if !client.conn.isClosed() {
 		t.Fatal("connection returned after session close was not closed")
 	}
 }
+
+func TestSessionCloseAllowsJSEventsDuringNetworkCleanup(t *testing.T) {
+	gate := make(chan struct{})
+	streamClose := newEventBlockingCloser(gate)
+	clientClose := newEventBlockingCloser(gate)
+	client := &eventBlockingSessionClient{
+		closer: clientClose,
+		conn:   &eventBlockingConn{closer: streamClose},
+	}
+	session := newJSSession(client)
+	connection, err := awaitPromise(session.Get("dial").Invoke(dialOptions(104)))
+	if err != nil {
+		t.Fatalf("initial dial: %v", err)
+	}
+	timer, release := releaseOnJSTimer(gate, streamClose.started, clientClose.started)
+	defer release()
+	session.Get("close").Invoke()
+	session.Get("close").Invoke()
+	connection.Get("close").Invoke()
+	if !session.Get("close").Equal(js.Global().Get("Boolean")) || !connection.Get("close").Equal(js.Global().Get("Boolean")) {
+		t.Fatal("session or stream callbacks remained reachable after logical close")
+	}
+	if _, err := awaitPromise(session.Get("dial").Invoke(dialOptions(104))); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatal("dial after logical close did not reject promptly")
+	}
+	if _, err := awaitPromise(connection.Get("read").Invoke()); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatal("stream read after logical close did not reject promptly")
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("JS timer could not finish while session cleanup was blocked: %v", err)
+	}
+	waitForCleanup(t, streamClose.finished)
+	waitForCleanup(t, clientClose.finished)
+	if streamClose.calls.Load() != 1 || clientClose.calls.Load() != 1 || client.dials.Load() != 1 {
+		t.Fatal("session cleanup duplicated physical closes or allowed a post-close dial")
+	}
+}
+
+type eventBlockingSessionClient struct {
+	closer *eventBlockingCloser
+	conn   net.Conn
+	dials  atomic.Int32
+}
+
+func (c *eventBlockingSessionClient) DialTCPPort(ctx context.Context, _ uint16) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.dials.Add(1)
+	return c.conn, nil
+}
+
+func (c *eventBlockingSessionClient) Close() error { return c.closer.Close() }
 
 func TestFailedDialReleasesReservation(t *testing.T) {
 	client := &fakeSessionClient{dialFailures: 1}

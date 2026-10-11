@@ -21,6 +21,7 @@ test("publishes the production security and compressed-WASM headers", async ({ r
   expect(home.headers()["x-robots-tag"]).toContain("noindex");
   expect(home.headers()["x-frame-options"]).toBe("DENY");
   expect(home.headers()["referrer-policy"]).toBe("no-referrer");
+  expect(home.headers()["cache-control"]).toContain("no-transform");
 
   const wasm = await request.head("/main.wasm.gz");
   expect(wasm.status()).toBe(200);

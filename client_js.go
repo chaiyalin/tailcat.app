@@ -392,7 +392,10 @@ func (s *jsSession) close() {
 		stream.close()
 	}
 	if client != nil {
-		_ = client.Close()
+		// DERP shutdown can await JavaScript WebSocket events. The session's
+		// closed state, cancellation and stream callbacks above are already
+		// invalidated; let the browser event loop run during network cleanup.
+		go func() { _ = client.Close() }()
 	}
 }
 
