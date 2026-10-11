@@ -86,6 +86,15 @@
             <button id="listen-btn" class="button primary label-icon icon-lock" type="button" disabled data-i18n="start_room">Open encrypted room</button>
             <button id="stop-listen-btn" class="button danger hidden label-icon icon-xmark" type="button" data-i18n="stop_room">Close room</button>
           </div>
+
+          <div id="group-create-entry" class="group-create-entry hidden">
+            <div class="group-entry-heading">
+              <span class="pill" data-i18n="group_beta">Group Beta</span>
+              <strong data-i18n="group_create_entry_title">Share with up to 10 people</strong>
+            </div>
+            <p class="field-help" data-i18n="group_create_entry_body">Group text is coordinated by the trusted host. Files and voice notes go directly to the recipients you select.</p>
+            <button id="group-create-entry-btn" class="button group-entry-button" type="button" data-i18n="group_create_entry_button">Create group room</button>
+          </div>
         </div>
 
         <div id="listen-info" class="address-card hidden">
@@ -102,6 +111,76 @@
             <button id="copy-addr" class="button small label-icon icon-copy" type="button" data-i18n="copy_address">Copy address</button>
           </div>
         </div>
+      </section>
+
+      <section id="group-room-panel" class="panel group-room-panel hidden" aria-labelledby="group-room-heading">
+        <div class="panel-heading">
+          <span class="step">G</span>
+          <div>
+            <div class="group-heading-line">
+              <h2 id="group-room-heading" data-i18n="group_room_heading">Group room</h2>
+              <span class="pill" data-i18n="group_beta">Group Beta</span>
+            </div>
+            <p data-i18n="group_room_intro">The host keeps this temporary room available and orders group messages.</p>
+          </div>
+        </div>
+
+        <div class="group-room-summary">
+          <span><strong id="group-room-count" aria-live="polite">1 / 10</strong><small data-i18n="group_people_online">people online</small></span>
+          <span><strong id="group-room-role" data-i18n="group_role_owner">Host</strong><small data-i18n="group_your_role">your role</small></span>
+        </div>
+        <p id="group-room-status" class="field-help group-room-status" role="status" data-i18n="group_status_starting">Opening group room…</p>
+
+        <div id="group-invite-card" class="address-card group-invite-card hidden">
+          <span class="field-label" data-i18n="group_invite_title">Group invitation</span>
+          <p class="field-help" data-i18n="group_invite_body">Anyone with this invitation can request to join. You approve every request.</p>
+          <code id="group-invite-link" class="address" aria-live="polite"></code>
+          <div class="button-row wrap">
+            <button id="group-share-invite-btn" class="button small primary mobile-only label-icon icon-share" type="button" data-i18n="native_share">Share invite</button>
+            <button id="group-copy-invite-btn" class="button small primary label-icon icon-copy" type="button" data-i18n="copy_invite">Copy invite</button>
+            <button id="group-show-qr-btn" class="button small label-icon icon-qr" type="button" data-i18n="show_qr">Show QR</button>
+          </div>
+        </div>
+
+        <section class="group-section" aria-labelledby="group-members-heading">
+          <div class="group-section-heading">
+            <h3 id="group-members-heading" data-i18n="group_members_title">Members</h3>
+            <span data-i18n="group_members_limit">10 maximum</span>
+          </div>
+          <ol id="group-members-list" class="group-list" aria-live="polite"></ol>
+        </section>
+
+        <section id="group-pending-panel" class="group-section hidden" aria-labelledby="group-pending-heading">
+          <div class="group-section-heading">
+            <h3 id="group-pending-heading" data-i18n="group_pending_title">Join requests</h3>
+            <output id="group-pending-count" aria-live="polite">0</output>
+          </div>
+          <ol id="group-pending-list" class="group-list group-pending-list"></ol>
+        </section>
+
+        <div class="group-owner-controls">
+          <button id="group-pause-joins-btn" class="button small" type="button" data-i18n="group_pause_joins">Pause joining</button>
+          <button id="group-rotate-invite-btn" class="button small label-icon icon-refresh" type="button" data-i18n="group_rotate_invite">Rotate invite</button>
+          <button id="group-close-room-btn" class="button small danger label-icon icon-xmark" type="button" data-i18n="group_close_room">Close group room</button>
+        </div>
+        <button id="group-leave-room-btn" class="button small danger label-icon icon-xmark hidden" type="button" data-i18n="group_leave_room">Leave group room</button>
+
+        <div class="group-trust-note">
+          <strong data-i18n="group_trust_title">Know the group trust model</strong>
+          <p data-i18n="group_trust_body">Each network link is encrypted. Group text is coordinated by—and visible to—the trusted host. Files and voice notes are sent peer to peer only to selected recipients.</p>
+        </div>
+      </section>
+
+      <section id="group-waiting-panel" class="panel group-waiting-panel hidden" aria-labelledby="group-waiting-heading">
+        <div class="panel-heading">
+          <span class="step">G</span>
+          <div>
+            <h2 id="group-waiting-heading" data-i18n="group_waiting_title">Waiting for the host</h2>
+            <p data-i18n="group_waiting_body">Your request expires after 60 seconds. Member names and messages stay hidden until the host approves you and the connection is verified.</p>
+          </div>
+        </div>
+        <p id="group-waiting-status" class="group-waiting-status" role="status" data-i18n="group_waiting_status">Join request sent…</p>
+        <button id="group-waiting-cancel-btn" class="button danger" type="button" data-i18n="group_cancel_request">Cancel request</button>
       </section>
 
       <section class="panel join-panel">
@@ -124,7 +203,7 @@
         <p id="ios-note" class="field-help warning hidden" data-i18n="ios_beta">iOS Safari beta · keep this page in the foreground</p>
         <p id="capability-note" class="capability-note field-help warning hidden" role="status"></p>
         <p id="background-risk" class="background-risk field-help warning hidden" role="alert" data-i18n="background_risk">Keep this page in the foreground. Locking the device or switching apps may interrupt the room or a transfer.</p>
-        <p class="field-help" data-i18n="encryption_note">Text, files and voice notes use Tailcat's WireGuard end-to-end encryption. Browser traffic currently passes through a DERP relay.</p>
+        <p id="encryption-note" class="field-help" data-i18n="encryption_note">Private-room text, files and voice notes use the two-party Tailcat encrypted link. Group Beta encrypts each network link, while its trusted host can read group text and coordinate membership.</p>
       </section>
 
       <section class="panel live-panel">
@@ -141,8 +220,9 @@
 
     <main id="content" class="chat">
       <span class="secure-badge"><span class="ui-icon icon-shield" aria-hidden="true"></span><span data-i18n="secure">End-to-end encrypted</span></span>
+      <p id="group-wake-lock-alert" class="field-help warning group-wake-lock-alert hidden" role="alert" data-i18n="group_wake_lock_failed">The screen could not be kept awake. To host on mobile, manually keep this page in the foreground and the screen on.</p>
 
-      <section id="history" class="history" tabindex="-1" aria-live="polite" aria-label="Messages">
+      <section id="history" class="history" tabindex="-1" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false" data-i18n-aria-label="messages_title" aria-label="Messages">
         <div id="welcome" class="welcome">
           <picture class="welcome-art-frame" aria-hidden="true">
             <source media="(max-width: 1366px) and (pointer: coarse)" srcset="assets/voxel-cat-mark.webp">
@@ -163,10 +243,18 @@
 
       <section id="composer" class="composer">
         <div id="drop-zone" class="drop-zone hidden" data-i18n="drop_files">Drop files to add them to the queue</div>
+        <div id="group-recipient-panel" class="group-recipient-panel hidden" aria-labelledby="group-recipient-heading">
+          <div class="group-recipient-heading">
+            <div><strong id="group-recipient-heading" data-i18n="group_recipient_title">File &amp; voice recipients</strong><small data-i18n="group_recipient_help">Choose who receives the next file or voice note.</small></div>
+            <label class="group-select-all"><input id="group-recipient-all" type="checkbox"><span data-i18n="group_select_all">Select all</span></label>
+          </div>
+          <div id="group-recipient-list" class="group-recipient-list" role="group" aria-labelledby="group-recipient-heading"></div>
+          <output id="group-recipient-summary" class="group-recipient-summary" aria-live="polite" data-i18n="group_no_recipients">No recipients selected</output>
+        </div>
         <div class="compose-row">
           <button id="attach-btn" class="icon-button" type="button" disabled data-i18n-title="attach" aria-label="Attach files"><span class="ui-icon icon-attachment" aria-hidden="true"></span></button>
           <input id="send-file" type="file" multiple hidden>
-          <textarea id="send-text" class="field message-input" rows="1" maxlength="65536" disabled data-i18n-placeholder="message_placeholder" placeholder="Write an encrypted message…"></textarea>
+          <textarea id="send-text" class="field message-input" rows="1" maxlength="65536" disabled data-i18n-placeholder="message_placeholder" data-i18n-aria-label="message_input_label" aria-label="Message" placeholder="Write an encrypted message…"></textarea>
           <button id="ptt-btn" class="icon-button" type="button" disabled data-i18n-title="record_voice" aria-label="Hold to record voice note"><span class="ui-icon icon-microphone" aria-hidden="true"></span></button>
           <button id="send-text-btn" class="icon-button send" type="button" disabled data-i18n-title="send_message" aria-label="Send message"><span class="ui-icon icon-send" aria-hidden="true"></span></button>
         </div>
@@ -178,6 +266,7 @@
           </div>
         </div>
         <p class="composer-hint" data-i18n="composer_hint">Enter sends · Shift+Enter adds a line · hold the microphone button to record</p>
+        <p id="private-file-auto-note" class="composer-hint" data-i18n="private_file_auto_note">Private-room files up to 100 MiB are received automatically into temporary browser storage. Larger files require approval.</p>
         <p id="send-progress" class="composer-status" aria-live="polite"></p>
         <button id="send-btn" type="button" hidden disabled>Send file</button>
       </section>
@@ -213,6 +302,47 @@
     </footer>
   </div>
 
+  <dialog id="group-create-dialog" class="modal" aria-labelledby="group-create-dialog-title">
+    <div class="modal-card group-modal-card">
+      <span class="eyebrow" data-i18n="group_beta">Group Beta</span>
+      <h2 id="group-create-dialog-title" data-i18n="group_create_title">Create a temporary group room</h2>
+      <p data-i18n="group_create_body">Up to 10 people, including you. The room and its in-memory history disappear when the host leaves.</p>
+      <label class="field-label" for="group-create-nickname" data-i18n="group_nickname_label">Your nickname</label>
+      <input id="group-create-nickname" class="field" type="text" minlength="1" maxlength="24" autocomplete="off" required data-i18n-placeholder="group_nickname_placeholder" placeholder="1–24 characters">
+      <p class="field-help" data-i18n="group_nickname_help">Nicknames are not verified and may be duplicated. A random member code is always shown.</p>
+      <div class="group-beta-facts">
+        <span data-i18n="group_fact_text">Group text is visible to the trusted host</span>
+        <span data-i18n="group_fact_media">Files and voice notes are peer to peer</span>
+        <span data-i18n="group_fact_no_calls">Calls and screen sharing remain one-to-one only</span>
+      </div>
+      <label id="group-mobile-host-warning" class="check-row group-mobile-host-warning hidden">
+        <input id="group-mobile-host-confirm" type="checkbox">
+        <span><strong data-i18n="group_mobile_host_title">Keep this phone awake and in the foreground</strong><small data-i18n="group_mobile_host_body">Switching apps or locking the screen pauses the room. If you do not return within 120 seconds, the room closes for everyone.</small></span>
+      </label>
+      <p id="group-create-status" class="field-help warning hidden" role="alert"></p>
+      <div class="button-row end group-dialog-actions">
+        <button id="group-create-cancel-btn" class="button" type="button" data-i18n="cancel">Cancel</button>
+        <button id="group-create-btn" class="button primary" type="button" disabled data-i18n="group_create_submit">Create group room</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="group-join-dialog" class="modal" aria-labelledby="group-join-dialog-title">
+    <div class="modal-card group-modal-card">
+      <span class="eyebrow" data-i18n="group_beta">Group Beta</span>
+      <h2 id="group-join-dialog-title" data-i18n="group_join_title">Request to join this group</h2>
+      <p id="group-join-room-summary" data-i18n="group_join_body">The host must approve you before you can see members or messages.</p>
+      <label class="field-label" for="group-join-nickname" data-i18n="group_nickname_label">Your nickname</label>
+      <input id="group-join-nickname" class="field" type="text" minlength="1" maxlength="24" autocomplete="off" required data-i18n-placeholder="group_nickname_placeholder" placeholder="1–24 characters">
+      <p class="field-help" data-i18n="group_nickname_help">Nicknames are not verified and may be duplicated. A random member code is always shown.</p>
+      <p id="group-join-status" class="field-help warning hidden" role="alert"></p>
+      <div class="button-row end group-dialog-actions">
+        <button id="group-join-cancel-btn" class="button" type="button" data-i18n="cancel">Cancel</button>
+        <button id="group-join-btn" class="button primary" type="button" disabled data-i18n="group_request_join">Request to join</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="qr-dialog" class="modal">
     <div class="modal-card qr-card">
       <h2 data-i18n="qr_title">Scan to join this room</h2>
@@ -236,11 +366,42 @@
 
   <template id="incoming-file-template">
     <li class="transfer-item incoming-transfer">
-      <div class="transfer-copy"><strong class="transfer-name"></strong><span class="transfer-detail"></span><progress max="1" value="0"></progress><span class="transfer-local-note hidden"></span></div>
-      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button><button class="button small primary export-file hidden" type="button"></button><button class="button small danger delete-file hidden" type="button"></button></div>
+      <div class="transfer-copy"><strong class="transfer-name"></strong><span class="transfer-detail"></span><progress max="1" value="0" aria-label="Transfer progress" data-i18n-title="transfer_progress"></progress><span class="transfer-local-note hidden"></span></div>
+      <div class="button-row transfer-actions"><button class="button small primary save-file" type="button"></button><button class="button small danger reject-file" type="button"></button><button class="button small danger cancel-file hidden" type="button"></button><button class="button small primary open-file hidden" type="button"></button><button class="button small primary export-file hidden" type="button"></button><button class="button small danger delete-file hidden" type="button"></button></div>
     </li>
   </template>
 
+  <template id="group-member-template">
+    <li class="group-list-item group-member-item">
+      <span class="group-member-avatar" aria-hidden="true"></span>
+      <span class="group-list-copy"><strong class="group-member-name"></strong><span><code class="group-member-code"></code><span class="group-member-role"></span></span></span>
+      <span class="group-member-state"></span>
+      <button class="button small danger group-remove-member hidden" type="button" data-i18n="group_remove_member">Remove</button>
+    </li>
+  </template>
+
+  <template id="group-pending-template">
+    <li class="group-list-item group-pending-item">
+      <span class="group-list-copy"><strong class="group-pending-name"></strong><span><code class="group-pending-code"></code><span class="group-pending-expiry"></span></span></span>
+      <span class="button-row group-request-actions"><button class="button small primary group-approve-join" type="button" data-i18n="group_approve_join">Approve</button><button class="button small danger group-reject-join" type="button" data-i18n="group_reject_join">Reject</button></span>
+    </li>
+  </template>
+
+  <template id="group-recipient-template">
+    <label class="group-recipient-option">
+      <input class="group-recipient-checkbox" type="checkbox">
+      <span class="group-recipient-copy"><strong class="group-recipient-name"></strong><code class="group-recipient-code"></code></span>
+    </label>
+  </template>
+
+  <template id="group-transfer-status-template">
+    <li class="group-transfer-recipient" data-status="pending">
+      <span class="group-transfer-recipient-copy"><strong class="group-transfer-recipient-name"></strong><code class="group-transfer-recipient-code"></code></span>
+      <output class="group-transfer-recipient-status" data-i18n="group_transfer_pending">Waiting</output>
+    </li>
+  </template>
+
+  <script src="runtime-config.js"></script>
   <script src="wasm_exec.js"></script>
   <script type="module" src="app.js?v=starbridge-1"></script>
 </body>

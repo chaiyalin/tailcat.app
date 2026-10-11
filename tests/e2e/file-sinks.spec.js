@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import {
   connectMockPeer,
@@ -82,6 +85,29 @@ async function listStagedFiles(page) {
     }
     return files;
   });
+}
+
+async function listStagedFileSizes(page) {
+  return page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const directory = await root.getDirectoryHandle("tailcat-transfers", { create: true });
+    const sizes = [];
+    for await (const [, handle] of directory.entries()) {
+      sizes.push((await handle.getFile()).size);
+    }
+    return sizes;
+  });
+}
+
+async function createSparseFile(directory, name, size) {
+  const path = join(directory, name);
+  const handle = await open(path, "w");
+  try {
+    await handle.truncate(size);
+  } finally {
+    await handle.close();
+  }
+  return path;
 }
 
 test.describe("streaming file sinks", () => {
@@ -336,6 +362,229 @@ test.describe("streaming file sinks", () => {
     });
   });
 
+  test("automatically receives a common private file into OPFS without a consent click", async ({ context }) => {
+    const { receiver, peer } = await openConnectedOPFSReceiver(context);
+    const name = "private-auto-receive.txt";
+    const contents = Buffer.from("private files at or below the threshold are staged automatically");
+    await receiver.evaluate(() => {
+      globalThis.__mockOpenClicks = [];
+      const originalClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function clickStagedFile() {
+        if (this.target === "_blank") {
+          globalThis.__mockOpenClicks.push({ href: this.href, rel: this.rel });
+          return;
+        }
+        return originalClick.call(this);
+      };
+    });
+
+    await peer.locator("#send-file").setInputFiles({
+      name,
+      mimeType: "text/plain",
+      buffer: contents,
+    });
+
+    const incoming = receiver.locator(".incoming-transfer", { hasText: name });
+    await expect(incoming).toBeVisible();
+    await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvDone)).toBe(true);
+    await expect(incoming.locator(".save-file")).toBeHidden();
+    await expect(incoming.locator(".reject-file")).toBeHidden();
+    await expect(incoming.locator(".open-file")).toBeVisible();
+    await expect(incoming.locator(".export-file")).toBeVisible();
+    await expect(peer.locator(".transfer-item", { hasText: name })).toContainText(/received and SHA-256 verified/iu);
+    expect(await listStagedFiles(receiver)).toEqual([
+      expect.objectContaining({ size: contents.length, bytes: [...contents] }),
+    ]);
+
+    await incoming.locator(".open-file").click();
+    expect(await receiver.evaluate(() => globalThis.__mockOpenClicks)).toEqual([
+      expect.objectContaining({ href: expect.stringMatching(/^blob:/u), rel: "noopener noreferrer" }),
+    ]);
+    await expect(incoming.locator(".open-file")).toBeVisible();
+    await expect(incoming.locator(".export-file")).toBeVisible();
+    expect(await listStagedFiles(receiver)).toEqual([
+      expect.objectContaining({ size: contents.length, bytes: [...contents] }),
+    ]);
+
+    await incoming.locator(".delete-file").click();
+    await expect.poll(() => listStagedFiles(receiver)).toEqual([]);
+    await peer.close();
+    await receiver.close();
+  });
+
+  test("does not offer inline opening for automatically staged active content", async ({ context }) => {
+    const { receiver, peer } = await openConnectedOPFSReceiver(context);
+    for (const [name, mimeType, contents] of [
+      ["unsafe-document.html", "text/html", "<script>location='https://example.invalid'</script>"],
+      ["unsafe-vector.svg", "image/svg+xml", "<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>"],
+      ["unsafe-program.exe", "application/x-msdownload", "MZ"],
+    ]) {
+      await peer.locator("#send-file").setInputFiles({
+        name,
+        mimeType,
+        buffer: Buffer.from(contents),
+      });
+      const incoming = receiver.locator(".incoming-transfer", { hasText: name });
+      await expect(incoming).toHaveAttribute("data-finished", "true");
+      await expect(incoming.locator(".open-file")).toBeHidden();
+      await expect(incoming.locator(".export-file")).toBeVisible();
+      await incoming.locator(".delete-file").click();
+    }
+    await expect.poll(() => listStagedFileSizes(receiver)).toEqual([]);
+    await peer.close();
+    await receiver.close();
+  });
+
+  test("limits one private session to twenty automatic receive items including zero-byte files", async ({ context }) => {
+    const { receiver, peer } = await openConnectedOPFSReceiver(context);
+    const files = Array.from({ length: 21 }, (_, index) => ({
+      name: `zero-byte-${String(index + 1).padStart(2, "0")}.bin`,
+      mimeType: "application/octet-stream",
+      buffer: Buffer.alloc(0),
+    }));
+
+    await peer.locator("#send-file").setInputFiles(files);
+
+    const automatic = receiver.locator(
+      '.incoming-transfer[data-receive-mode="automatic"][data-finished="true"]',
+    );
+    await expect(automatic).toHaveCount(20);
+    for (let index = 0; index < 20; index += 1) {
+      const incoming = receiver.locator(".incoming-transfer", { hasText: files[index].name });
+      await expect(incoming).toHaveAttribute("data-receive-mode", "automatic");
+      await expect(incoming.locator(".save-file")).toBeHidden();
+      await expect(incoming.locator(".export-file")).toBeVisible();
+    }
+    expect(await listStagedFileSizes(receiver)).toEqual(Array(20).fill(0));
+
+    const twentyFirst = receiver.locator(".incoming-transfer", { hasText: files[20].name });
+    await expect(twentyFirst).toHaveAttribute("data-receive-mode", "manual");
+    await expect(twentyFirst.locator(".save-file")).toBeVisible();
+    await expect(twentyFirst.locator(".reject-file")).toBeVisible();
+    await receiver.waitForTimeout(300);
+    expect(await receiver.evaluate(() => globalThis.tcTest.recvBytes)).toBe(0);
+    expect(await peer.evaluate(() => globalThis.tcTest.sentBytes)).toBe(0);
+    await expect(twentyFirst).not.toHaveAttribute("data-finished", "true");
+
+    await twentyFirst.locator(".reject-file").click();
+    await expect(peer.locator(".transfer-item", { hasText: files[20].name })).toContainText(/declined|rejected/iu);
+    await peer.close();
+    await receiver.close();
+  });
+
+  test("automatically receives a private file of exactly 100 MiB", async ({ context }) => {
+    test.setTimeout(300_000);
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "tailcat-auto-boundary-"));
+    const exactThreshold = 100 * 1024 * 1024;
+    try {
+      const { receiver, peer } = await openConnectedOPFSReceiver(context);
+      const name = "exactly-100-mib.bin";
+      const path = await createSparseFile(temporaryDirectory, name, exactThreshold);
+
+      await peer.locator("#send-file").setInputFiles(path);
+
+      const incoming = receiver.locator(".incoming-transfer", { hasText: name });
+      await expect(incoming).toBeVisible();
+      await expect.poll(
+        () => receiver.evaluate(() => globalThis.tcTest.recvDone),
+        { timeout: 240_000 },
+      ).toBe(true);
+      await expect(incoming.locator(".save-file")).toBeHidden();
+      await expect(incoming.locator(".export-file")).toBeVisible();
+      await expect(peer.locator(".transfer-item", { hasText: name })).toContainText(
+        /received and SHA-256 verified/iu,
+        { timeout: 240_000 },
+      );
+      expect(await listStagedFileSizes(receiver)).toEqual([exactThreshold]);
+
+      await incoming.locator(".delete-file").click();
+      await expect.poll(() => listStagedFileSizes(receiver)).toEqual([]);
+      await peer.close();
+      await receiver.close();
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("requires manual confirmation for a private file one byte above 100 MiB", async ({ context }) => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "tailcat-manual-boundary-"));
+    const aboveThreshold = (100 * 1024 * 1024) + 1;
+    try {
+      const { receiver, peer } = await openConnectedOPFSReceiver(context);
+      await installMockSavePicker(receiver);
+      const name = "100-mib-plus-one.bin";
+      const path = await createSparseFile(temporaryDirectory, name, aboveThreshold);
+
+      await peer.locator("#send-file").setInputFiles(path);
+
+      const incoming = receiver.locator(".incoming-transfer", { hasText: name });
+      await expect(incoming).toBeVisible();
+      await expect(incoming.locator(".save-file")).toBeVisible();
+      await expect(incoming.locator(".reject-file")).toBeVisible();
+      await receiver.waitForTimeout(300);
+      expect(await receiver.evaluate(() => globalThis.tcTest.recvBytes)).toBe(0);
+      expect(await peer.evaluate(() => globalThis.tcTest.sentBytes)).toBe(0);
+      expect(await receiver.evaluate(() => globalThis.__mockSave.pickerCalls)).toBe(0);
+
+      await incoming.locator(".reject-file").click();
+      await expect(peer.locator(".transfer-item", { hasText: name })).toContainText(/declined|rejected/iu);
+      expect(await receiver.evaluate(() => globalThis.__mockSave.totalBytes)).toBe(0);
+      await peer.close();
+      await receiver.close();
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to a manual picker when automatic OPFS creation fails", async ({ context }) => {
+    const { receiver, peer } = await openConnectedOPFSReceiver(context);
+    await installMockSavePicker(receiver);
+    await receiver.evaluate(() => {
+      const prototype = FileSystemFileHandle.prototype;
+      const originalCreateWritable = prototype.createWritable;
+      globalThis.__mockOPFSCreateFailures = 0;
+      Object.defineProperty(prototype, "createWritable", {
+        configurable: true,
+        value: async function createWritable(...args) {
+          if (globalThis.__mockOPFSCreateFailures === 0) {
+            globalThis.__mockOPFSCreateFailures += 1;
+            throw new DOMException("Injected OPFS create failure", "InvalidStateError");
+          }
+          return originalCreateWritable.apply(this, args);
+        },
+      });
+    });
+    const name = "opfs-fallback.txt";
+    const contents = Buffer.from("save with the explicit picker after OPFS fails");
+
+    await peer.locator("#send-file").setInputFiles({
+      name,
+      mimeType: "text/plain",
+      buffer: contents,
+    });
+
+    const incoming = receiver.locator(".incoming-transfer", { hasText: name });
+    await expect(incoming).toBeVisible();
+    await expect.poll(() => receiver.evaluate(() => globalThis.__mockOPFSCreateFailures)).toBe(1);
+    await expect(incoming.locator(".save-file")).toBeVisible();
+    await expect(incoming.locator(".save-file")).toBeEnabled();
+    await expect(incoming.locator(".reject-file")).toBeVisible();
+    expect(await receiver.evaluate(() => globalThis.tcTest.recvBytes)).toBe(0);
+    expect(await receiver.evaluate(() => globalThis.__mockSave.pickerCalls)).toBe(0);
+
+    await incoming.locator(".save-file").click();
+    await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvDone)).toBe(true);
+    expect(await receiver.evaluate(() => globalThis.__mockSave)).toEqual(expect.objectContaining({
+      pickerCalls: 1,
+      totalBytes: contents.length,
+      closed: true,
+      aborted: false,
+    }));
+    await expect(peer.locator(".transfer-item", { hasText: name })).toContainText(/received and SHA-256 verified/iu);
+    await peer.close();
+    await receiver.close();
+  });
+
   test("does not evict an unexported OPFS file after more than 100 completed transfers", async ({ context }) => {
     test.setTimeout(180_000);
     const { receiver, peer } = await openConnectedOPFSReceiver(context);
@@ -349,7 +598,6 @@ test.describe("streaming file sinks", () => {
     });
     const staged = receiver.locator(".incoming-transfer", { hasText: stagedName });
     await expect(staged).toBeVisible();
-    await staged.locator(".save-file").click();
     await expect.poll(() => receiver.evaluate(() => globalThis.tcTest.recvDone)).toBe(true);
     await expect(staged.locator(".export-file")).toBeVisible();
     const [initialFile] = await listStagedFiles(receiver);
@@ -396,7 +644,6 @@ test.describe("streaming file sinks", () => {
     });
     const incoming = receiver.locator(".incoming-transfer", { hasText: name });
     await expect(incoming).toBeVisible();
-    await incoming.locator(".save-file").click();
 
     await expect.poll(() => receiver.evaluate(
       () => globalThis.__fileCloseWriteFailure || null,

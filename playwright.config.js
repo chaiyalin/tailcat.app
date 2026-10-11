@@ -40,6 +40,11 @@ export default defineConfig({
       name: "ios-safari",
       testMatch: /mobile\.spec\.js/u,
       use: {
+        // Safari upgrades loopback subresources under the production CSP. Use
+        // one synthetic HTTPS origin from the first navigation so classic
+        // wasm_exec.js cannot race the module graph while test routes proxy
+        // requests to the local HTTP fixture.
+        baseURL: "https://127.0.0.1:4173",
         browserName: "webkit",
         userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
         viewport: { width: 390, height: 844 },

@@ -4,13 +4,190 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"os"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"syscall/js"
 	"testing"
 	"time"
+
+	"github.com/tailscale/tailcat"
 )
+
+// These disposable fixture keys and address were generated and serialized with
+// github.com/tailscale/tailcat v0.4.0. Keeping the literal old bytes means this
+// test catches a wire-format change rather than comparing v0.7 with itself.
+const v04ListenerKeyJSON = `{"Private":"privkey:088e75f612f5ce459a0a7af66830eedae601a59951ba5af0376d4367079b817e","Public":{"ServerPublic":"nodekey:d4432ec8ba9baa857e26790c68ad5da9b7b195b3bf6e34352d91d64e14915f79","ServerDiscoPublic":"discokey:93a09eea6a18b02094c7e0ba9ea3b648f35738bf4e3f24d10a7443a914635175","RegionID":304}}`
+const v04ListenerAddr = "tco2FwWCDUQy7IupuqhX4meQxorV2pt7GVs79uNDUtkdZOFJFfeWFrWCCToJ7qahiwIJTH4Lqeo7ZI81c4v04_JNEKdEOpFGNRdWFpGQEw"
+
+func TestBrowserListenerNewKeyRetainsNoPSKFormat(t *testing.T) {
+	pk, err := browserListenerKey("")
+	if err != nil {
+		t.Fatalf("new listener key: %v", err)
+	}
+	if !pk.Public.PresharedKey.IsZero() {
+		t.Fatal("new compatible browser listener includes a PSK")
+	}
+	if pk.Private.IsZero() || pk.Public.ServerPublic.NodePublic != pk.Private.Public() || pk.Public.ServerDiscoPublic.IsZero() {
+		t.Fatal("new listener lost its node or independent discovery identity")
+	}
+	if pk.Public.RegionID != -1 || len(pk.Public.Region) != 0 {
+		t.Fatal("new listener did not retain automatic region selection")
+	}
+	pk.Public.RegionID = 304
+	ci, err := tailcat.ParseAddr(pk.Public.Addr())
+	if err != nil || !ci.PresharedKey.IsZero() {
+		t.Fatalf("new address does not round-trip without a PSK: %v", err)
+	}
+	if !ci.ServerPublic.Equal(pk.Public.ServerPublic) || !ci.ServerDiscoPublic.Equal(pk.Public.ServerDiscoPublic) {
+		t.Fatal("new listener address changed node or discovery identity")
+	}
+}
+
+func TestBrowserListenerRestoresV04IdentityAndAddressBytes(t *testing.T) {
+	pk, err := browserListenerKey(v04ListenerKeyJSON)
+	if err != nil {
+		t.Fatalf("restore v0.4 key: %v", err)
+	}
+	if !pk.Public.PresharedKey.IsZero() {
+		t.Fatal("restoring a v0.4 key introduced a PSK")
+	}
+	if got := string(pk.Public.Addr()); got != v04ListenerAddr {
+		t.Fatal("restoring a v0.4 key changed the existing address bytes")
+	}
+	private, err := pk.Private.MarshalText()
+	if err != nil || string(private) != "privkey:088e75f612f5ce459a0a7af66830eedae601a59951ba5af0376d4367079b817e" {
+		t.Fatal("restoring a v0.4 key changed the private node identity")
+	}
+	if pk.Public.ServerPublic.NodePublic != pk.Private.Public() {
+		t.Fatal("restored node identity does not match its address")
+	}
+	if !pk.Public.ServerDiscoPublic.Equal(tailcat.DiscoPublicForNode(pk.Private)) {
+		t.Fatal("restored discovery identity does not match the server's derived key")
+	}
+	encoded, err := json.Marshal(pk)
+	if err != nil {
+		t.Fatalf("serialize restored key: %v", err)
+	}
+	back, err := browserListenerKey(string(encoded))
+	if err != nil || !back.Private.Equal(pk.Private) || string(back.Public.Addr()) != v04ListenerAddr {
+		t.Fatalf("persisting and reopening changed the v0.4 identity or address: %v", err)
+	}
+}
+
+func TestBrowserListenerRejectsExistingPSKWithoutDowngrade(t *testing.T) {
+	pk := tailcat.NewPrivateKey()
+	if pk.Public.PresharedKey.IsZero() {
+		t.Fatal("v0.7 fixture did not generate the expected PSK")
+	}
+	encoded, err := json.Marshal(pk)
+	if err != nil {
+		t.Fatalf("serialize PSK fixture: %v", err)
+	}
+	restored, err := browserListenerKey(string(encoded))
+	if restored != nil || err == nil || !strings.Contains(err.Error(), "PSK listener keys are not supported") {
+		t.Fatal("PSK key was not explicitly rejected before listener construction")
+	}
+	secret, _ := pk.Public.PresharedKey.MarshalText()
+	if strings.Contains(err.Error(), string(secret)) {
+		t.Fatal("PSK rejection exposed the secret")
+	}
+	if pk.Public.PresharedKey.IsZero() {
+		t.Fatal("PSK rejection modified the supplied fixture")
+	}
+	if restored, err := browserListenerKey("not-json"); restored != nil || err == nil || !strings.Contains(err.Error(), "parsing privateKey") {
+		t.Fatal("invalid persisted key was not rejected before listener construction")
+	}
+}
+
+func TestPrivateKeyDecodeDoesNotExposeMalformedPSK(t *testing.T) {
+	const secret = "psk:malformed-secret-fixture-only"
+	encoded := strings.Replace(v04ListenerKeyJSON, `"RegionID":304`, `"PresharedKey":"`+secret+`","RegionID":304`, 1)
+	const want = "parsing privateKey: invalid JSON or key encoding"
+	for _, parse := range []struct {
+		name string
+		call func(string) (*tailcat.PrivateKey, error)
+	}{{"decoder", decodeBrowserPrivateKey}, {"listener key", browserListenerKey}} {
+		t.Run(parse.name, func(t *testing.T) {
+			pk, err := parse.call(encoded)
+			if pk != nil || err == nil || err.Error() != want || strings.Contains(err.Error(), secret) {
+				t.Fatal("malformed private key did not produce a fixed, secret-free error")
+			}
+		})
+	}
+	onConnection := js.FuncOf(func(js.Value, []js.Value) any { return nil })
+	defer onConnection.Release()
+	for _, connect := range []struct {
+		name string
+		call func(js.Value, []js.Value) any
+	}{{"listener", tailcatListen}, {"persistent client", tailcatConnect}, {"single dial", tailcatDial}} {
+		t.Run(connect.name, func(t *testing.T) {
+			opts := js.Global().Get("Object").New()
+			opts.Set("addr", v04ListenerAddr)
+			opts.Set("derpMapURL", "https://example.invalid/derpmap.json")
+			opts.Set("privateKey", encoded)
+			opts.Set("onConnection", onConnection)
+			promise := connect.call(js.Undefined(), []js.Value{opts}).(js.Value)
+			if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), secret) {
+				t.Fatal("bridge exposed malformed private-key input or did not reject before networking")
+			}
+		})
+	}
+}
+
+func TestReleaseVersionSourcesAgree(t *testing.T) {
+	const expected = "0.3.1-beta.1"
+	type manifest struct {
+		Version  string              `json:"version"`
+		Packages map[string]manifest `json:"packages"`
+	}
+
+	read := func(name string) []byte {
+		t.Helper()
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return contents
+	}
+	decode := func(name string) manifest {
+		t.Helper()
+		var value manifest
+		if err := json.Unmarshal(read(name), &value); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		return value
+	}
+
+	packageJSON := decode("package.json")
+	packageLock := decode("package-lock.json")
+	versions := map[string]string{
+		"package.json":              packageJSON.Version,
+		"package-lock.json":         packageLock.Version,
+		"package-lock root package": packageLock.Packages[""].Version,
+	}
+	for source, version := range versions {
+		if version != expected {
+			t.Errorf("%s version = %q; want %q", source, version, expected)
+		}
+	}
+	config := string(read("web/config.js"))
+	if !strings.Contains(config, `version: "`+expected+`"`) {
+		t.Errorf("web/config.js does not expose %q", expected)
+	}
+	readme := string(read("README.md"))
+	if !strings.Contains(readme, "Release target `"+expected+"`") {
+		t.Errorf("README.md does not declare release target %q", expected)
+	}
+	if !strings.Contains(readme, "tag `app-v"+expected+"`") {
+		t.Errorf("README.md does not declare tag app-v%s", expected)
+	}
+}
 
 func TestIncrementalSHA256(t *testing.T) {
 	h := js.ValueOf(tailcatNewSHA256(js.Undefined(), nil))
@@ -39,6 +216,40 @@ func TestIncrementalSHA256(t *testing.T) {
 	}
 
 	h.Get("close").Invoke()
+}
+
+func TestSHA256CloseUsesNativeShimsAcrossCycles(t *testing.T) {
+	const cycles = 64
+	chunk := js.Global().Get("Uint8Array").New(3)
+	if copied := js.CopyBytesToJS(chunk, []byte("abc")); copied != 3 {
+		t.Fatalf("CopyBytesToJS copied %d bytes, want 3", copied)
+	}
+
+	for cycle := 0; cycle < cycles; cycle++ {
+		h := js.ValueOf(tailcatNewSHA256(js.Undefined(), nil))
+		if _, err := awaitPromise(h.Get("update").Invoke(chunk)); err != nil {
+			t.Fatalf("cycle %d update: %v", cycle, err)
+		}
+		h.Get("close").Invoke()
+
+		if !h.Get("close").Equal(js.Global().Get("Boolean")) {
+			t.Fatalf("cycle %d close did not become the native idempotent shim", cycle)
+		}
+		if got := h.Get("close").Invoke(); got.Type() != js.TypeBoolean || got.Bool() {
+			t.Fatalf("cycle %d second close = %v; want false from Boolean()", cycle, got)
+		}
+		for _, method := range []string{"update", "digestHex"} {
+			var promise js.Value
+			if method == "update" {
+				promise = h.Get(method).Invoke(chunk)
+			} else {
+				promise = h.Get(method).Invoke()
+			}
+			if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), "closed") {
+				t.Fatalf("cycle %d %s after close error = %v; want closed rejection", cycle, method, err)
+			}
+		}
+	}
 }
 
 func TestOptRegionID(t *testing.T) {
@@ -84,20 +295,313 @@ func TestJSConnWritesAllAndClosesIdempotently(t *testing.T) {
 	}
 	wrapped.Get("close").Invoke()
 	wrapped.Get("close").Invoke()
-	if !c.closed || closedCallbacks != 1 {
-		t.Fatalf("closed = %v, callbacks = %d; want true, 1", c.closed, closedCallbacks)
+	waitForCleanup(t, c.closed.Load)
+	if !c.closed.Load() || closedCallbacks != 1 {
+		t.Fatalf("closed = %v, callbacks = %d; want true, 1", c.closed.Load(), closedCallbacks)
+	}
+}
+
+func TestJSConnReadHonorsOptionalMaximum(t *testing.T) {
+	c := &limitedReadConn{data: []byte("abcdefgh")}
+	wrapped := makeJSConn(c, 104, nil)
+	read := func(args ...any) (js.Value, error) {
+		t.Helper()
+		return awaitPromise(wrapped.Get("read").Invoke(args...))
+	}
+	bytesFromJS := func(value js.Value) string {
+		t.Helper()
+		if !value.InstanceOf(js.Global().Get("Uint8Array")) {
+			t.Fatalf("read value type = %v; want Uint8Array", value.Type())
+		}
+		got := make([]byte, value.Get("byteLength").Int())
+		if copied := js.CopyBytesToGo(got, value); copied != len(got) {
+			t.Fatalf("CopyBytesToGo copied %d bytes, want %d", copied, len(got))
+		}
+		return string(got)
+	}
+
+	first, err := read(3)
+	if err != nil {
+		t.Fatalf("read(3): %v", err)
+	}
+	if got := bytesFromJS(first); got != "abc" {
+		t.Fatalf("read(3) = %q, want %q", got, "abc")
+	}
+	second, err := read()
+	if err != nil {
+		t.Fatalf("read(): %v", err)
+	}
+	if got := bytesFromJS(second); got != "defgh" {
+		t.Fatalf("read() = %q, want %q", got, "defgh")
+	}
+	eof, err := read(js.Undefined())
+	if err != nil {
+		t.Fatalf("read(undefined): %v", err)
+	}
+	if eof.Type() != js.TypeNull {
+		t.Fatalf("read at EOF = %v, want null", eof)
+	}
+	if got, want := c.readBufferSizes, []int{3, 64 << 10, 64 << 10}; !slices.Equal(got, want) {
+		t.Fatalf("read buffer sizes = %v, want %v", got, want)
+	}
+
+	for _, bad := range []any{0, -1, 1.5, (64 << 10) + 1, "3", js.Null()} {
+		if _, err := read(bad); err == nil || !strings.Contains(err.Error(), "read maximum") {
+			t.Errorf("read(%v) error = %v; want maximum validation rejection", bad, err)
+		}
+	}
+	if _, err := read(1, 2); err == nil || !strings.Contains(err.Error(), "at most one") {
+		t.Errorf("read(1, 2) error = %v; want arity rejection", err)
+	}
+	wrapped.Get("close").Invoke()
+}
+
+func TestJSConnCloseUsesNativeShimsAcrossCycles(t *testing.T) {
+	const cycles = 64
+	payload := js.Global().Get("Uint8Array").New(1)
+	if copied := js.CopyBytesToJS(payload, []byte{0x5a}); copied != 1 {
+		t.Fatalf("CopyBytesToJS copied %d bytes, want 1", copied)
+	}
+
+	for cycle := 0; cycle < cycles; cycle++ {
+		connection := &shortWriteConn{}
+		closedCallbacks := 0
+		wrapped := makeJSConn(connection, 104, func() { closedCallbacks++ })
+		wrapped.Get("close").Invoke()
+
+		waitForCleanup(t, connection.closed.Load)
+		if !connection.closed.Load() || closedCallbacks != 1 {
+			t.Fatalf("cycle %d closed = %v, callbacks = %d; want true, 1", cycle, connection.closed.Load(), closedCallbacks)
+		}
+		if !wrapped.Get("close").Equal(js.Global().Get("Boolean")) {
+			t.Fatalf("cycle %d close did not become the native idempotent shim", cycle)
+		}
+		if got := wrapped.Get("close").Invoke(); got.Type() != js.TypeBoolean || got.Bool() {
+			t.Fatalf("cycle %d second close = %v; want false from Boolean()", cycle, got)
+		}
+
+		operations := []struct {
+			name    string
+			promise js.Value
+		}{
+			{name: "read", promise: wrapped.Get("read").Invoke()},
+			{name: "write", promise: wrapped.Get("write").Invoke(payload)},
+			{name: "closeWrite", promise: wrapped.Get("closeWrite").Invoke()},
+		}
+		for _, operation := range operations {
+			if _, err := awaitPromise(operation.promise); err == nil || !strings.Contains(err.Error(), "closed") {
+				t.Fatalf("cycle %d %s after close error = %v; want closed rejection", cycle, operation.name, err)
+			}
+		}
+	}
+}
+
+func TestListenerCloseAllowsJSEventsAndIsolatesInstances(t *testing.T) {
+	gate := make(chan struct{})
+	server := newEventBlockingCloser(gate)
+	object := js.Global().Get("Object").New()
+	var stopped atomic.Bool
+	attachJSListenerClose(object, server, &stopped)
+
+	otherServer := newEventBlockingCloser(gate)
+	otherObject := js.Global().Get("Object").New()
+	var otherStopped atomic.Bool
+	attachJSListenerClose(otherObject, otherServer, &otherStopped)
+
+	timer, release := releaseOnJSTimer(gate, server.started)
+	defer release()
+	object.Get("close").Invoke()
+	object.Get("close").Invoke()
+	if !stopped.Load() || !object.Get("close").Equal(js.Global().Get("Boolean")) {
+		t.Fatal("listener close did not synchronously invalidate its own callback")
+	}
+	if otherStopped.Load() || otherServer.calls.Load() != 0 {
+		t.Fatal("closing one listener changed a newer listener instance")
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("JS timer could not run during server cleanup: %v", err)
+	}
+	waitForCleanup(t, server.finished)
+	if server.calls.Load() != 1 {
+		t.Fatal("listener server was not closed exactly once")
+	}
+	otherObject.Get("close").Invoke()
+	waitForCleanup(t, otherServer.finished)
+	if !otherStopped.Load() || otherServer.calls.Load() != 1 {
+		t.Fatal("second listener was not independently cleaned up")
+	}
+}
+
+func TestStoppedListenerRejectsLateConnectionWithoutBlockingJS(t *testing.T) {
+	gate := make(chan struct{})
+	closer := newEventBlockingCloser(gate)
+	connection := &eventBlockingConn{closer: closer}
+	var stopped atomic.Bool
+	stopped.Store(true)
+	invocations := 0
+	onConnection := js.FuncOf(func(js.Value, []js.Value) any { invocations++; return nil })
+	defer onConnection.Release()
+	handler := listenerConnectionHandler(&stopped, onConnection.Value, 104)
+	timer, release := releaseOnJSTimer(gate, closer.started)
+	defer release()
+	// Exercise the handler inside an actual JS callback, as with dispatch from
+	// the WASM network stack. Closing the late raw stream must not block JS.
+	dispatch := js.FuncOf(func(js.Value, []js.Value) any { handler(connection); return nil })
+	dispatch.Invoke()
+	dispatch.Release()
+	if invocations != 0 {
+		t.Fatal("stopped listener invoked the retired onConnection callback")
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("late-stream cleanup blocked JS timer: %v", err)
+	}
+	waitForCleanup(t, closer.finished)
+	if closer.calls.Load() != 1 {
+		t.Fatal("late incoming connection was not closed exactly once")
+	}
+}
+
+func TestJSConnCloseAllowsEventsAndSerializesOwnedClientCleanup(t *testing.T) {
+	gate := make(chan struct{})
+	streamClose := newEventBlockingCloser(gate)
+	clientClose := newEventBlockingCloser(gate)
+	connection := &eventBlockingConn{closer: streamClose}
+	stateCleanup := 0
+	wrapped := makeJSConnWithCleanup(connection, 102, func() { stateCleanup++ }, func() {
+		if !streamClose.finished() {
+			t.Error("owned client shutdown began before raw stream shutdown finished")
+		}
+		_ = clientClose.Close()
+	})
+	timer, release := releaseOnJSTimer(gate, streamClose.started)
+	defer release()
+	wrapped.Get("close").Invoke()
+	wrapped.Get("close").Invoke()
+	if stateCleanup != 1 || !wrapped.Get("close").Equal(js.Global().Get("Boolean")) {
+		t.Fatal("stream callback/quota cleanup was not synchronous and idempotent")
+	}
+	if clientClose.calls.Load() != 0 {
+		t.Fatal("owned client shutdown did not wait for raw stream shutdown")
+	}
+	for _, method := range []string{"read", "write", "closeWrite"} {
+		var promise js.Value
+		if method == "write" {
+			promise = wrapped.Get(method).Invoke(js.Global().Get("Uint8Array").New(1))
+		} else {
+			promise = wrapped.Get(method).Invoke()
+		}
+		if _, err := awaitPromise(promise); err == nil || !strings.Contains(err.Error(), "closed") {
+			t.Fatalf("%s did not reject immediately after logical close", method)
+		}
+	}
+	if _, err := awaitPromise(timer); err != nil {
+		t.Fatalf("stream close blocked JS timer: %v", err)
+	}
+	waitForCleanup(t, clientClose.finished)
+	if streamClose.calls.Load() != 1 || clientClose.calls.Load() != 1 || stateCleanup != 1 {
+		t.Fatal("stream or owned client cleanup did not occur exactly once")
+	}
+}
+
+// The physical closer deliberately cannot finish until a JavaScript timer
+// releases its gate. A synchronous FuncOf close would deadlock this test by
+// preventing that timer from executing, matching browser WebSocket shutdown.
+type eventBlockingCloser struct {
+	calls   atomic.Int32
+	gate    <-chan struct{}
+	started chan struct{}
+	done    chan struct{}
+}
+
+func newEventBlockingCloser(gate <-chan struct{}) *eventBlockingCloser {
+	return &eventBlockingCloser{gate: gate, started: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (c *eventBlockingCloser) Close() error {
+	first := c.calls.Add(1) == 1
+	if first {
+		close(c.started)
+	}
+	<-c.gate
+	if first {
+		close(c.done)
+	}
+	return nil
+}
+
+func (c *eventBlockingCloser) finished() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+type eventBlockingConn struct {
+	shortWriteConn
+	closer *eventBlockingCloser
+}
+
+func (c *eventBlockingConn) Close() error { return c.closer.Close() }
+
+func releaseOnJSTimer(gate chan struct{}, started ...<-chan struct{}) (js.Value, func()) {
+	ready := js.FuncOf(func(js.Value, []js.Value) any {
+		for _, signal := range started {
+			select {
+			case <-signal:
+			default:
+				return false
+			}
+		}
+		return true
+	})
+	free := js.FuncOf(func(js.Value, []js.Value) any { close(gate); return nil })
+	factory := js.Global().Get("Function").New("ready", "free", `return new Promise(resolve => {
+  const timer = setInterval(() => {
+    if (!ready()) return;
+    clearInterval(timer); free(); resolve();
+  }, 1);
+});`)
+	return factory.Invoke(ready, free), func() { ready.Release(); free.Release() }
+}
+
+func waitForCleanup(t *testing.T, complete func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !complete() {
+		if time.Now().After(deadline) {
+			t.Fatal("physical network cleanup did not complete")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
 type shortWriteConn struct {
 	written     []byte
-	closed      bool
+	closed      atomic.Bool
 	writeClosed bool
+}
+
+type limitedReadConn struct {
+	shortWriteConn
+	data            []byte
+	readBufferSizes []int
+}
+
+func (c *limitedReadConn) Read(p []byte) (int, error) {
+	c.readBufferSizes = append(c.readBufferSizes, len(p))
+	if len(c.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.data)
+	c.data = c.data[n:]
+	return n, nil
 }
 
 func (c *shortWriteConn) Read([]byte) (int, error) { return 0, io.EOF }
 func (c *shortWriteConn) Write(p []byte) (int, error) {
-	if c.closed {
+	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
 	n := min(2, len(p))
@@ -105,7 +609,7 @@ func (c *shortWriteConn) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (c *shortWriteConn) CloseWrite() error                { c.writeClosed = true; return nil }
-func (c *shortWriteConn) Close() error                     { c.closed = true; return nil }
+func (c *shortWriteConn) Close() error                     { c.closed.Store(true); return nil }
 func (c *shortWriteConn) LocalAddr() net.Addr              { return testAddr("local") }
 func (c *shortWriteConn) RemoteAddr() net.Addr             { return testAddr("remote") }
 func (c *shortWriteConn) SetDeadline(time.Time) error      { return nil }

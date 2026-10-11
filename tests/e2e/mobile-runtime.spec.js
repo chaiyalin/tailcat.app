@@ -67,6 +67,16 @@ test.describe("mobile runtime lifecycle primitives", () => {
         requests: sentinels.length,
       };
 
+      // A browser may revoke a sentinel while the page is still visible.
+      // The logical reasons remain, so the manager must reacquire on its own.
+      await sentinels.at(-1).release();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const afterSpontaneousRelease = {
+        active: manager.active,
+        count: manager.referenceCount,
+        requests: sentinels.length,
+      };
+
       await manager.release("file-transfer");
       await manager.release("file-transfer");
       const afterPartialRelease = {
@@ -82,7 +92,14 @@ test.describe("mobile runtime lifecycle primitives", () => {
       };
       await manager.cleanup();
 
-      return { afterAcquire, whileHidden, afterResume, afterPartialRelease, afterFinalRelease };
+      return {
+        afterAcquire,
+        whileHidden,
+        afterResume,
+        afterSpontaneousRelease,
+        afterPartialRelease,
+        afterFinalRelease,
+      };
     });
 
     expect(result).toEqual({
@@ -94,6 +111,7 @@ test.describe("mobile runtime lifecycle primitives", () => {
       },
       whileHidden: { active: false, count: 3, released: true },
       afterResume: { active: true, count: 3, requests: 2 },
+      afterSpontaneousRelease: { active: true, count: 3, requests: 3 },
       afterPartialRelease: { active: true, count: 1, reasons: ["voice-note"] },
       afterFinalRelease: { active: false, count: 0, released: true },
     });

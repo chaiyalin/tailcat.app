@@ -230,6 +230,7 @@ export class ScreenWakeLockManager {
     this.sentinel = null;
     /** @type {Promise<boolean> | null} */
     this.pendingRequest = null;
+    this.retryTimer = null;
     this.disposed = false;
 
     this.handleVisibilityChange = () => {
@@ -302,7 +303,16 @@ export class ScreenWakeLockManager {
 
         this.sentinel = sentinel;
         sentinel.addEventListener?.("release", () => {
-          if (this.sentinel === sentinel) this.sentinel = null;
+          if (this.sentinel !== sentinel) return;
+          this.sentinel = null;
+          if (this.disposed
+            || this.referenceCount === 0
+            || this.documentRef?.visibilityState !== "visible") return;
+          clearTimeout(this.retryTimer);
+          this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            void this.request();
+          }, 250);
         }, { once: true });
         return !sentinel.released;
       } catch (error) {
@@ -367,6 +377,8 @@ export class ScreenWakeLockManager {
   async cleanup() {
     if (this.disposed) return;
     this.disposed = true;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     this.documentRef?.removeEventListener?.("visibilitychange", this.handleVisibilityChange);
     const pendingRequest = this.pendingRequest;
     await this.releaseAll();

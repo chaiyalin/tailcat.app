@@ -24,9 +24,9 @@
   <main class="legal-page">
     <p class="eyebrow">Public beta · 公开测试</p>
     <h1>公开测试条款 / Public beta terms</h1>
-    <p class="lede">这是一个无账号、无离线存储的实验性一对一传输工具。使用即表示你理解测试版的限制，并同意本条款与可接受使用政策。</p>
-    <p class="lede" lang="en">This is an experimental, accountless, one-to-one transfer tool with no offline storage. By using it, you acknowledge the beta limitations and agree to these terms and the Acceptable Use Policy.</p>
-    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-01</p>
+    <p class="lede">这是一个无账号、无离线存储的实验性临时传输工具，提供一对一房间和最多 10 人的多人房间测试版。使用即表示你理解测试版的限制，并同意本条款与可接受使用政策。</p>
+    <p class="lede" lang="en">This is an experimental, accountless temporary transfer tool with private one-to-one rooms and a Group Beta for up to 10 people, with no offline storage. By using it, you acknowledge the beta limitations and agree to these terms and the Acceptable Use Policy.</p>
+    <p class="updated">生效及更新日期 / Effective and updated: 2026-09-04</p>
 
     <div class="notice warning">
       <p><strong>测试版 / Beta:</strong> 服务可能限速、中断、丢失连接、重置持久地址或发生协议不兼容；没有可用性、吞吐量、送达或数据恢复保证。The service can be rate-limited, interrupted, lose connections, reset persistent addresses, or become protocol-incompatible. There is no availability, throughput, delivery, or recovery guarantee.</p>
@@ -40,8 +40,10 @@
         <p>访问或使用 tailcat.app 即表示你同意本条款、<a href="/acceptable-use/">可接受使用政策</a>与<a href="/privacy/">隐私说明</a>。如不同意，请勿使用。若你代表组织使用，你确认有权让该组织受这些条款约束。</p>
 
         <h2>2. 服务内容</h2>
-        <p>tailcat.app 提供一对一的临时网页房间，可在双方同时在线时传输文字、文件和语音留言，并尝试建立 WebRTC 语音、视频或屏幕共享。服务不提供账号、身份认证、通讯录、离线文件托管、云端聊天历史、备份、恢复、内容审核或病毒扫描。</p>
-        <p>持有邀请链接或 Tailcat 地址的人可能连接房间。端到端加密保护传输内容，但不会证明对端身份。你应通过可信渠道交换邀请，并自行确认通信对象。</p>
+        <p>tailcat.app 提供一对一的临时网页房间，以及最多 10 人（含房主）的多人房间测试版。一对一房间可传输文字、文件和语音留言，并尝试建立 WebRTC 语音、视频或屏幕共享。多人房间支持群聊文字、文件和语音留言，不支持实时通话或屏幕共享。服务不提供账号、身份认证、通讯录、离线文件托管、云端聊天历史、备份、恢复、内容审核或病毒扫描。</p>
+        <p>私人一对一房间中，不超过 100 MiB 的文件可在安全 OPFS 临时存储和可信容量估算可用时自动接收；每个已认证会话最多自动接收 20 个文件、累计 500 MiB，零字节文件也计一件，达到任一上限后，本会话后续文件转为手动确认，新会话重置计数。超过 100 MiB 或无法安全自动暂存时，仍须接收者确认并在支持时选择保存位置。多人文件始终由每位所选接收者分别确认。自动接收不会自动打开、预览或扫描文件；完成大小与 SHA-256 校验后，仍须由接收者点击打开、保存或分享。</p>
+        <p>多人房主审批加入申请、协调群聊文字，并可移除成员、暂停加入、轮换邀请或关闭房间。房主关闭或刷新页面，或移动房主离开前台超过 120 秒，房间会为所有人解散且不转移房主。新成员看不到加入前的消息；已加入成员只能在 120 秒窗口内尝试恢复房主内存中仍保留的有限事件。</p>
+        <p>持有邀请链接或 Tailcat 地址的人可能连接或申请加入。昵称未经验证、允许重名，随机成员短码也不是身份认证。链路加密不会证明参与者身份。你应通过可信渠道交换邀请，并自行确认通信对象。</p>
 
         <h2>3. 测试基础设施</h2>
         <p>浏览器 Tailcat 流量使用公共 DERP 中继。公共中继限速、无 SLA、无吞吐量目标，可能随时变更或停止。实时媒体使用 WebRTC 和公共 STUN，不提供 TURN，所以某些网络无法通话。我们可以为安全、容量、合规或维护需要更改、暂停或停止部分或全部服务。</p>
@@ -49,17 +51,18 @@
         <h2>4. 你的责任</h2>
         <ul>
           <li>仅发送你有权发送的内容，并遵守适用法律及<a href="/acceptable-use/">可接受使用政策</a>；</li>
-          <li>保护邀请链接、房间地址与持久私钥，不在公开场所暴露；</li>
-          <li>接收前确认发送者与文件用途，在本地使用可信安全工具检查文件；</li>
+          <li>保护邀请链接、房间地址、加入令牌与一对一持久私钥，不在公开场所暴露；</li>
+          <li>作为多人房主时，理解你是群聊文字的可信协调端，谨慎审批、移除成员并保持页面在线；</li>
+          <li>即使私人小文件已自动暂存，也应在打开、保存或分享前确认发送者与文件用途，并在本地使用可信安全工具检查文件；</li>
           <li>维护安全、受支持且及时更新的浏览器与操作系统；</li>
           <li>获得语音、视频、屏幕、个人数据或受保护内容所需的同意与许可。</li>
         </ul>
 
         <h2>5. 内容与知识产权</h2>
-        <p>你保留对自己内容的权利。为完成点对点传输，你授权浏览器、Cloudflare、DERP 和网络服务在技术所需范围内临时处理相关数据。我们不主张获得你的文件或消息所有权。项目代码和第三方组件分别受<a href="/licenses/">开源许可</a>约束。</p>
+        <p>你保留对自己内容的权利。为完成传输，你授权参与者浏览器、Cloudflare、DERP 和网络服务在技术所需范围内临时处理相关数据。多人群聊文字会由可信房主浏览器读取、排序并转发；多人文件和语音留言则直接传给所选接收者。我们不主张获得你的文件或消息所有权。项目代码和第三方组件分别受<a href="/licenses/">开源许可</a>约束。</p>
 
         <h2>6. 隐私与安全</h2>
-        <p>传输内容采用端到端加密，但网络元数据仍存在，WebRTC 还可能向通信对端和 STUN 服务暴露公网 IP。终端、浏览器扩展、剪贴板、截图或恶意对端不在加密保护范围内。详情见<a href="/privacy/">隐私说明</a>和<a href="/security/">安全说明</a>。</p>
+        <p>一对一内容及多人房间的每条网络链路采用加密，但多人群聊文字对房主可见，并非对房主隐藏的群组端到端加密。网络元数据仍存在，一对一 WebRTC 还可能向通信对端和 STUN 服务暴露公网 IP。终端、浏览器扩展、剪贴板、截图、恶意房主或其他恶意参与者不在加密保护范围内。详情见<a href="/privacy/">隐私说明</a>和<a href="/security/">安全说明</a>。</p>
 
         <h2>7. 无保证</h2>
         <p>在法律允许的最大范围内，服务按“现状”和“可用”方式免费提供，不作任何明示或默示保证，包括适销性、特定用途适用性、不侵权、安全性、准确性、兼容性、可用性、传输成功或数据完整性的保证。你应保留原始文件和独立备份。</p>
@@ -84,8 +87,10 @@
         <p>By accessing or using tailcat.app, you agree to these terms, the <a href="/acceptable-use/">Acceptable Use Policy</a>, and the <a href="/privacy/">Privacy Notice</a>. Do not use the service if you disagree. If you use it for an organization, you represent that you can bind that organization to these terms.</p>
 
         <h2>2. What the service does</h2>
-        <p>tailcat.app provides temporary one-to-one browser rooms for text, files, and voice notes while both peers are online, and attempts WebRTC voice, video, or screen sharing. It provides no account, identity verification, contact list, offline file hosting, cloud chat history, backup, recovery, content moderation, or malware scanning.</p>
-        <p>A person who holds an invitation link or Tailcat address may be able to connect. End-to-end encryption protects transferred content but does not prove peer identity. Exchange invitations through a trusted channel and verify the person you intend to reach.</p>
+        <p>tailcat.app provides temporary one-to-one browser rooms and a Group Beta for up to 10 people including the host. Private rooms carry text, files, and voice notes and attempt WebRTC voice, video, or screen sharing. Group rooms carry group text, files, and voice notes, but do not offer live calls or screen sharing. The service provides no account, identity verification, contact list, offline file hosting, cloud chat history, backup, recovery, content moderation, or malware scanning.</p>
+        <p>In a private one-to-one room, a file up to and including 100 MiB may be received automatically when safe OPFS temporary storage and a trustworthy capacity estimate are available. Each authenticated session can auto-receive at most 20 files and 500 MiB in total; a zero-byte file counts as one, reaching either limit makes later files in that session manual, and a new session resets the counters. A file over 100 MiB, or one that cannot be staged automatically and safely, still requires recipient approval and a selected destination where supported. Every group file always requires separate approval from each selected recipient. Automatic receive never automatically opens, previews, or scans a file; the recipient must click to open, save, or share it after size and SHA-256 verification.</p>
+        <p>A group host approves join requests, coordinates group text, and can remove members, pause joining, rotate the invitation, or close the room. Closing or refreshing the host page—or leaving a mobile host in the background for more than 120 seconds—ends the room for everyone, with no host transfer. New members receive no earlier messages; existing members can only attempt a 120-second recovery from the limited events still in the host's memory.</p>
+        <p>A person holding an invitation link or Tailcat address may connect or request admission. Nicknames are unverified and can be duplicated, and random member codes are not identity verification. Link encryption does not prove participant identity. Exchange invitations through a trusted channel and verify the people you intend to reach.</p>
 
         <h2>3. Beta infrastructure</h2>
         <p>Browser Tailcat traffic uses public DERP relays. Those relays are rate-limited, have no SLA or throughput target, and may change or stop at any time. Live media uses WebRTC and public STUN with no TURN fallback, so calls fail on some networks. We may change, suspend, or discontinue any part of the service for security, capacity, compliance, or maintenance.</p>
@@ -93,17 +98,18 @@
         <h2>4. Your responsibilities</h2>
         <ul>
           <li>Send only content you have the right to send, in compliance with applicable law and the <a href="/acceptable-use/">Acceptable Use Policy</a>;</li>
-          <li>Protect invitation links, room addresses, and persistent private keys from public exposure;</li>
-          <li>Confirm the sender and purpose of a file before accepting it, and inspect it locally with trusted security tools;</li>
+          <li>Protect invitation links, room addresses, join tokens, and private-room persistent keys from public exposure;</li>
+          <li>When hosting a group, understand that you are the trusted coordinator for group text, approve and remove members carefully, and keep the page online;</li>
+          <li>Even when a small private-room file was staged automatically, confirm its sender and purpose and inspect it locally with trusted security tools before opening, saving, or sharing it;</li>
           <li>Maintain a secure, supported, and current browser and operating system; and</li>
           <li>Obtain any consent or permission required for audio, video, displays, personal data, or protected content.</li>
         </ul>
 
         <h2>5. Content and intellectual property</h2>
-        <p>You retain your rights in your content. To complete a peer transfer, you authorize the browsers, Cloudflare, DERP, and network services to process relevant data temporarily to the technical extent required. We do not claim ownership of your files or messages. Project code and third-party components remain subject to their respective <a href="/licenses/">open-source licenses</a>.</p>
+        <p>You retain your rights in your content. To complete a transfer, you authorize participant browsers, Cloudflare, DERP, and network services to process relevant data temporarily to the technical extent required. A trusted group host browser reads, orders, and relays group text; group files and voice notes go directly to selected recipients. We do not claim ownership of your files or messages. Project code and third-party components remain subject to their respective <a href="/licenses/">open-source licenses</a>.</p>
 
         <h2>6. Privacy and security</h2>
-        <p>Transfer content is end-to-end encrypted, but network metadata still exists, and WebRTC may expose your public IP to the peer and STUN service. Endpoints, browser extensions, clipboards, screenshots, and malicious peers are outside the encryption boundary. See the <a href="/privacy/">Privacy Notice</a> and <a href="/security/">Security Notes</a>.</p>
+        <p>Private-room content and every group-room network link are encrypted, but group text is visible to the host and is not host-blind group end-to-end encryption. Network metadata still exists, and private-room WebRTC may expose your public IP to the peer and STUN service. Endpoints, browser extensions, clipboards, screenshots, a malicious host, and other malicious participants are outside the encryption boundary. See the <a href="/privacy/">Privacy Notice</a> and <a href="/security/">Security Notes</a>.</p>
 
         <h2>7. No warranties</h2>
         <p>To the fullest extent permitted by law, this free service is provided “as is” and “as available,” without express or implied warranties, including merchantability, fitness for a particular purpose, non-infringement, security, accuracy, compatibility, availability, successful delivery, or data integrity. Keep original files and independent backups.</p>
